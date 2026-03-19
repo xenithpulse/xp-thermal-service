@@ -1,0 +1,114 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9100,
+    "enableHttps": false
+  },
+  "security": {
+    "allowedOrigins": [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://localhost:3001",
+      "http://127.0.0.1:3001"
+    ],
+    "allowedHosts": [
+      "localhost",
+      "127.0.0.1"
+    ],
+    "rateLimitPerMinute": 120,
+    "enableApiKey": false,
+    "maxPayloadSize": 1048576
+  },
+  "queue": {
+    "maxConcurrentJobs": 3,
+    "maxRetries": 5,
+    "retryDelayMs": 1000,
+    "retryBackoffMultiplier": 2,
+    "maxRetryDelayMs": 60000,
+    "jobTimeoutMs": 30000,
+    "cleanupIntervalMs": 3600000,
+    "maxJobAgeMs": 604800000,
+    "persistPath": "./data/jobs.db"
+  },
+  "logging": {
+    "level": "info",
+    "file": "./logs/service.log",
+    "console": true
+  },
+  "printers": [
+    {
+      "id": "kitchen",
+      "name": "Kitchen Printer",
+      "type": "network",
+      "enabled": true,
+      "isDefault": false,
+      "host": "192.168.1.100",
+      "port": 9100,
+      "timeout": 10000,
+      "maxRetries": 3,
+      "capabilities": {
+        "maxWidth": 48,
+        "supportsBold": true,
+        "supportsUnderline": true,
+        "supportsBarcode": true,
+        "supportsQRCode": true,
+        "supportsImage": false,
+        "supportsCut": true,
+        "supportsPartialCut": true,
+        "supportsCashDrawer": false,
+        "supportsDensity": true,
+        "codepage": 0
+      }
+    },
+    {
+      "id": "cashier",
+      "name": "Cashier Receipt Printer",
+      "type": "network",
+      "enabled": true,
+      "isDefault": true,
+      "host": "192.168.1.101",
+      "port": 9100,
+      "timeout": 10000,
+      "maxRetries": 3,
+      "capabilities": {
+        "maxWidth": 48,
+        "supportsBold": true,
+        "supportsUnderline": true,
+        "supportsBarcode": true,
+        "supportsQRCode": true,
+        "supportsImage": false,
+        "supportsCut": true,
+        "supportsPartialCut": true,
+        "supportsCashDrawer": true,
+        "supportsDensity": true,
+        "codepage": 0
+      }
+    },
+    {
+      "id": "usb-receipt",
+      "name": "USB Receipt Printer",
+      "type": "usb",
+      "enabled": false,
+      "isDefault": false,
+      "printerName": "XP-80C",
+      "timeout": 10000,
+      "maxRetries": 3,
+      "capabilities": {
+        "maxWidth": 48,
+        "supportsBold": true,
+        "supportsUnderline": true,
+        "supportsBarcode": true,
+        "supportsQRCode": true,
+        "supportsImage": false,
+        "supportsCut": true,
+        "supportsPartialCut": false,
+        "supportsCashDrawer": true,
+        "supportsDensity": true,
+        "codepage": 0
+      },
+      "metadata": {
+        "note": "Set printerName to match your Windows printer name (Control Panel > Devices and Printers)"
+      }
+    }
+  ]
+}

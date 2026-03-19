@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XP Thermal Service - Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
+  
+  .header { background: #1a1a2e; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .header .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .dot.green { background: #4ade80; }
+  .dot.yellow { background: #facc15; }
+  .dot.red { background: #f87171; }
+  
+  .container { max-width: 960px; margin: 24px auto; padding: 0 16px; }
+  
+  .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; overflow: hidden; }
+  .card-header { padding: 14px 20px; border-bottom: 1px solid #e5e5e5; display: flex; align-items: center; justify-content: space-between; }
+  .card-header h2 { font-size: 15px; font-weight: 600; }
+  .card-body { padding: 20px; }
+  
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat { background: #fafafa; border-radius: 6px; padding: 14px; text-align: center; border: 1px solid #eee; }
+  .stat .val { font-size: 24px; font-weight: 700; color: #1a1a2e; }
+  .stat .lbl { font-size: 11px; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 2px solid #e5e5e5; font-weight: 600; color: #555; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; }
+  tr:hover td { background: #fafafa; }
+  
+  .badge { display: inline-block; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge.online { background: #dcfce7; color: #166534; }
+  .badge.offline { background: #fee2e2; color: #991b1b; }
+  .badge.error { background: #fef3c7; color: #92400e; }
+  
+  .btn { padding: 7px 14px; border: none; border-radius: 5px; font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: #1a1a2e; color: #fff; }
+  .btn-danger { background: #ef4444; color: #fff; }
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+  .btn-outline { background: transparent; border: 1px solid #ddd; color: #555; }
+  
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
+  .form-group input, .form-group select { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 13px; }
+  .form-group input:focus, .form-group select:focus { outline: none; border-color: #1a1a2e; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  
+  .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: #fff; border-radius: 10px; width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
+  .modal-header { padding: 16px 20px; border-bottom: 1px solid #e5e5e5; display: flex; justify-content: space-between; align-items: center; }
+  .modal-header h3 { font-size: 15px; }
+  .modal-body { padding: 20px; }
+  .modal-footer { padding: 14px 20px; border-top: 1px solid #e5e5e5; display: flex; justify-content: flex-end; gap: 8px; }
+  .close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: #888; }
+  
+  .actions { display: flex; gap: 6px; }
+  .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 6px; color: #fff; font-size: 13px; font-weight: 500; z-index: 200; animation: fadeIn 0.3s; }
+  .toast.success { background: #16a34a; }
+  .toast.error { background: #dc2626; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  
+  .footer { text-align: center; padding: 24px; color: #aaa; font-size: 11px; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .checkbox-row input[type="checkbox"] { width: auto; }
+  .checkbox-row label { margin-bottom: 0; }
+
+  .section-label { font-size: 12px; font-weight: 600; color: #1a1a2e; margin: 16px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #eee; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>XP Thermal Service</h1>
+  <div class="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Checking...</span>
+    <span style="margin-left:12px;opacity:0.6" id="versionText"></span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Stats Row -->
+  <div class="stats" id="stats"></div>
+
+  <!-- Printers Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Configured Printers</h2>
+      <button class="btn btn-primary btn-sm" onclick="openAddPrinter()">+ Add Printer</button>
+    </div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Target</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="printerTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Server Config Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Server Settings</h2>
+      <button class="btn btn-primary btn-sm" onclick="saveServerConfig()">Save</button>
+    </div>
+    <div class="card-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Host</label>
+          <input type="text" id="cfgHost" placeholder="127.0.0.1">
+        </div>
+        <div class="form-group">
+          <label>Port</label>
+          <input type="number" id="cfgPort" placeholder="9100">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Security Config Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Security Settings</h2>
+      <button class="btn btn-primary btn-sm" onclick="saveSecurityConfig()">Save</button>
+    </div>
+    <div class="card-body">
+      <div class="form-group">
+        <label>Allowed Origins (comma-separated)</label>
+        <input type="text" id="cfgOrigins" placeholder="http://localhost:3000, *">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Rate Limit (per minute)</label>
+          <input type="number" id="cfgRateLimit" placeholder="120">
+        </div>
+        <div class="form-group">
+          <label>API Key (leave blank to disable)</label>
+          <input type="text" id="cfgApiKey" placeholder="Optional">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Queue Stats Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Queue</h2>
+      <div class="actions">
+        <button class="btn btn-outline btn-sm" onclick="pauseQueue()">Pause</button>
+        <button class="btn btn-outline btn-sm" onclick="resumeQueue()">Resume</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="stats" id="queueStats"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">Powered by XenithPulse.com &middot; XP Thermal Service v<span id="footerVersion">1.0.0</span></div>
+
+<!-- Add / Edit Printer Modal -->
+<div class="modal-overlay" id="printerModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle">Add Printer</h3>
+      <button class="close-btn" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="editPrinterId">
+      
+      <div class="form-row">
+        <div class="form-group">
+          <label>Printer ID</label>
+          <input type="text" id="pId" placeholder="e.g. receipt, kitchen">
+        </div>
+        <div class="form-group">
+          <label>Display Name</label>
+          <input type="text" id="pName" placeholder="e.g. Receipt Printer">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Type</label>
+        <select id="pType" onchange="toggleTypeFields()">
+          <option value="usb">USB / Windows Printer</option>
+          <option value="network">Network (IP)</option>
+        </select>
+      </div>
+
+      <!-- USB fields -->
+      <div id="usbFields">
+        <div class="form-group">
+          <label>Windows Printer Name</label>
+          <select id="pPrinterName"><option value="">Loading system printers...</option></select>
+        </div>
+      </div>
+
+      <!-- Network fields -->
+      <div id="networkFields" style="display:none">
+        <div class="form-row">
+          <div class="form-group">
+            <label>IP Address</label>
+            <input type="text" id="pHost" placeholder="192.168.1.100">
+          </div>
+          <div class="form-group">
+            <label>Port</label>
+            <input type="number" id="pPort" value="9100">
+          </div>
+        </div>
+      </div>
+
+      <div class="section-label">Capabilities</div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Paper Width (characters)</label>
+          <input type="number" id="pWidth" value="48" min="20" max="80">
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <div class="checkbox-row"><input type="checkbox" id="pDefault"><label for="pDefault">Set as Default</label></div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <div class="checkbox-row"><input type="checkbox" id="capBarcode" checked><label for="capBarcode">Barcode</label></div>
+          <div class="checkbox-row"><input type="checkbox" id="capQR"><label for="capQR">QR Code</label></div>
+          <div class="checkbox-row"><input type="checkbox" id="capCut" checked><label for="capCut">Auto-Cut</label></div>
+        </div>
+        <div>
+          <div class="checkbox-row"><input type="checkbox" id="capCashDrawer" checked><label for="capCashDrawer">Cash Drawer</label></div>
+          <div class="checkbox-row"><input type="checkbox" id="capBold" checked><label for="capBold">Bold</label></div>
+          <div class="checkbox-row"><input type="checkbox" id="capUnderline" checked><label for="capUnderline">Underline</label></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="savePrinter()">Save Printer</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+// ── Helpers ──
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(API + path, opts);
+  return res.json();
+}
+
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// HTML-escape to prevent XSS
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = String(str == null ? '' : str);
+  return d.innerHTML;
+}
+
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
+}
+
+// ── Health & Stats ──
+async function loadHealth() {
+  try {
+    const d = await api('GET', '/health');
+    const dot = document.getElementById('statusDot');
+    const txt = document.getElementById('statusText');
+    dot.className = 'dot ' + (d.status === 'healthy' ? 'green' : d.status === 'degraded' ? 'yellow' : 'red');
+    txt.textContent = d.status.charAt(0).toUpperCase() + d.status.slice(1);
+    document.getElementById('versionText').textContent = 'v' + d.version;
+    document.getElementById('footerVersion').textContent = d.version;
+    
+    document.getElementById('stats').innerHTML = `
+      <div class="stat"><div class="val">${d.printers.total}</div><div class="lbl">Printers</div></div>
+      <div class="stat"><div class="val">${d.printers.online}</div><div class="lbl">Online</div></div>
+      <div class="stat"><div class="val">${d.queue.pending}</div><div class="lbl">Pending Jobs</div></div>
+      <div class="stat"><div class="val">${formatUptime(d.uptime)}</div><div class="lbl">Uptime</div></div>
+    `;
+  } catch {
+    document.getElementById('statusDot').className = 'dot red';
+    document.getElementById('statusText').textContent = 'Unreachable';
+  }
+}
+
+async function loadQueueStats() {
+  try {
+    const d = await api('GET', '/api/queue/stats');
+    document.getElementById('queueStats').innerHTML = `
+      <div class="stat"><div class="val">${d.queue.pending}</div><div class="lbl">Pending</div></div>
+      <div class="stat"><div class="val">${d.queue.processing}</div><div class="lbl">Processing</div></div>
+      <div class="stat"><div class="val">${d.queue.completed}</div><div class="lbl">Completed</div></div>
+      <div class="stat"><div class="val">${d.queue.failed}</div><div class="lbl">Failed</div></div>
+      <div class="stat"><div class="val">${d.isPaused ? 'Paused' : 'Active'}</div><div class="lbl">State</div></div>
+    `;
+  } catch {}
+}
+
+async function pauseQueue() { await api('POST', '/api/queue/pause'); toast('Queue paused'); loadQueueStats(); }
+async function resumeQueue() { await api('POST', '/api/queue/resume'); toast('Queue resumed'); loadQueueStats(); }
+
+// ── Printers ──
+async function loadPrinters() {
+  try {
+    const d = await api('GET', '/api/printers');
+    const tbody = document.getElementById('printerTable');
+    if (!d.printers || d.printers.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">No printers configured</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.printers.map(p => {
+      const target = p.config.type === 'network' 
+        ? `${esc(p.config.host || '')}:${esc(p.config.port || 9100)}` 
+        : esc(p.config.printerName || '-');
+      const statusCls = p.status === 'online' ? 'online' : p.status === 'offline' ? 'offline' : 'error';
+      return `<tr>
+        <td><strong>${esc(p.id)}</strong></td>
+        <td>${esc(p.config.name)}</td>
+        <td>${esc(p.config.type)}</td>
+        <td style="font-size:12px">${target}</td>
+        <td><span class="badge ${statusCls}">${esc(p.status)}</span></td>
+        <td class="actions">
+          <button class="btn btn-outline btn-sm" onclick="testPrinter('${esc(p.id)}')">Test</button>
+          <button class="btn btn-outline btn-sm" onclick="editPrinter('${esc(p.id)}')">Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="deletePrinter('${esc(p.id)}')">Del</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+async function testPrinter(id) {
+  try {
+    await api('POST', `/api/printers/${id}/test`, {});
+    toast('Test print sent to ' + id);
+  } catch { toast('Test print failed', 'error'); }
+}
+
+async function deletePrinter(id) {
+  if (!confirm(`Delete printer "${id}"? This will remove it from config.`)) return;
+  try {
+    await api('DELETE', `/api/config/printers/${id}`);
+    toast('Printer removed');
+    loadPrinters();
+    loadHealth();
+  } catch (e) { toast('Failed to delete', 'error'); }
+}
+
+// ── Config ──
+let configData = {};
+
+async function loadConfig() {
+  try {
+    configData = await api('GET', '/api/config');
+    document.getElementById('cfgHost').value = configData.server.host || '';
+    document.getElementById('cfgPort').value = configData.server.port || '';
+    document.getElementById('cfgOrigins').value = (configData.security.allowedOrigins || []).join(', ');
+    document.getElementById('cfgRateLimit').value = configData.security.rateLimitPerMinute || '';
+    document.getElementById('cfgApiKey').value = configData.security.apiKey || '';
+  } catch {}
+}
+
+async function saveServerConfig() {
+  try {
+    await api('PUT', '/api/config/server', {
+      host: document.getElementById('cfgHost').value,
+      port: parseInt(document.getElementById('cfgPort').value) || 9100
+    });
+    toast('Server config saved (restart required for host/port changes)');
+  } catch (e) { toast('Failed to save', 'error'); }
+}
+
+async function saveSecurityConfig() {
+  try {
+    const origins = document.getElementById('cfgOrigins').value.split(',').map(s => s.trim()).filter(Boolean);
+    const body = {
+      allowedOrigins: origins,
+      rateLimitPerMinute: parseInt(document.getElementById('cfgRateLimit').value) || 120
+    };
+    const key = document.getElementById('cfgApiKey').value.trim();
+    if (key) {
+      body.enableApiKey = true;
+      body.apiKey = key;
+    } else {
+      body.enableApiKey = false;
+    }
+    await api('PUT', '/api/config/security', body);
+    toast('Security config saved');
+  } catch (e) { toast('Failed to save', 'error'); }
+}
+
+// ── Printer Modal ──
+let systemPrinters = [];
+
+async function loadSystemPrinters() {
+  try {
+    const d = await api('GET', '/api/system/printers');
+    systemPrinters = d.printers || [];
+    const sel = document.getElementById('pPrinterName');
+    sel.innerHTML = '<option value="">-- Select a printer --</option>' + 
+      systemPrinters.map(p => `<option value="${esc(p.name)}">${esc(p.name)} (${p.status === '0' || p.status === 'Normal' ? 'Ready' : esc(p.status)})</option>`).join('');
+  } catch {}
+}
+
+function toggleTypeFields() {
+  const type = document.getElementById('pType').value;
+  document.getElementById('usbFields').style.display = type === 'usb' ? '' : 'none';
+  document.getElementById('networkFields').style.display = type === 'network' ? '' : 'none';
+}
+
+function openAddPrinter() {
+  document.getElementById('modalTitle').textContent = 'Add Printer';
+  document.getElementById('editPrinterId').value = '';
+  document.getElementById('pId').value = '';
+  document.getElementById('pId').disabled = false;
+  document.getElementById('pName').value = '';
+  document.getElementById('pType').value = 'usb';
+  document.getElementById('pPrinterName').value = '';
+  document.getElementById('pHost').value = '';
+  document.getElementById('pPort').value = '9100';
+  document.getElementById('pWidth').value = '48';
+  document.getElementById('pDefault').checked = false;
+  document.getElementById('capBarcode').checked = true;
+  document.getElementById('capQR').checked = false;
+  document.getElementById('capCut').checked = true;
+  document.getElementById('capCashDrawer').checked = true;
+  document.getElementById('capBold').checked = true;
+  document.getElementById('capUnderline').checked = true;
+  toggleTypeFields();
+  loadSystemPrinters();
+  document.getElementById('printerModal').classList.add('active');
+}
+
+async function editPrinter(id) {
+  const cfg = await api('GET', '/api/config');
+  const p = (cfg.printers || []).find(x => x.id === id);
+  if (!p) return;
+  
+  document.getElementById('modalTitle').textContent = 'Edit Printer';
+  document.getElementById('editPrinterId').value = id;
+  document.getElementById('pId').value = p.id;
+  document.getElementById('pId').disabled = true;
+  document.getElementById('pName').value = p.name;
+  document.getElementById('pType').value = p.type;
+  document.getElementById('pPrinterName').value = p.printerName || '';
+  document.getElementById('pHost').value = p.host || '';
+  document.getElementById('pPort').value = p.port || 9100;
+  document.getElementById('pWidth').value = p.capabilities?.maxWidth || 48;
+  document.getElementById('pDefault').checked = !!p.isDefault;
+  document.getElementById('capBarcode').checked = p.capabilities?.supportsBarcode ?? true;
+  document.getElementById('capQR').checked = p.capabilities?.supportsQRCode ?? false;
+  document.getElementById('capCut').checked = p.capabilities?.supportsCut ?? true;
+  document.getElementById('capCashDrawer').checked = p.capabilities?.supportsCashDrawer ?? true;
+  document.getElementById('capBold').checked = p.capabilities?.supportsBold ?? true;
+  document.getElementById('capUnderline').checked = p.capabilities?.supportsUnderline ?? true;
+  toggleTypeFields();
+  loadSystemPrinters().then(() => {
+    document.getElementById('pPrinterName').value = p.printerName || '';
+  });
+  document.getElementById('printerModal').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('printerModal').classList.remove('active');
+}
+
+async function savePrinter() {
+  const editId = document.getElementById('editPrinterId').value;
+  const type = document.getElementById('pType').value;
+  
+  const body = {
+    id: document.getElementById('pId').value.trim(),
+    name: document.getElementById('pName').value.trim(),
+    type: type,
+    enabled: true,
+    isDefault: document.getElementById('pDefault').checked,
+    capabilities: {
+      maxWidth: parseInt(document.getElementById('pWidth').value) || 48,
+      supportsBarcode: document.getElementById('capBarcode').checked,
+      supportsQRCode: document.getElementById('capQR').checked,
+      supportsCut: document.getElementById('capCut').checked,
+      supportsPartialCut: document.getElementById('capCut').checked,
+      supportsCashDrawer: document.getElementById('capCashDrawer').checked,
+      supportsBold: document.getElementById('capBold').checked,
+      supportsUnderline: document.getElementById('capUnderline').checked,
+      supportsImage: false,
+      supportsDensity: true,
+      codepage: 0
+    }
+  };
+
+  if (type === 'usb') {
+    body.printerName = document.getElementById('pPrinterName').value;
+  } else {
+    body.host = document.getElementById('pHost').value.trim();
+    body.port = parseInt(document.getElementById('pPort').value) || 9100;
+  }
+
+  if (!body.id || !body.name) {
+    toast('ID and Name are required', 'error');
+    return;
+  }
+
+  try {
+    if (editId) {
+      await api('PUT', `/api/config/printers/${editId}`, body);
+      toast('Printer updated (restart service to apply changes)');
+    } else {
+      await api('POST', '/api/config/printers', body);
+      toast('Printer added (restart service to apply changes)');
+    }
+    closeModal();
+    loadPrinters();
+    loadConfig();
+    loadHealth();
+  } catch (e) {
+    toast('Failed to save printer', 'error');
+  }
+}
+
+// ── Init ──
+loadHealth();
+loadPrinters();
+loadConfig();
+loadQueueStats();
+
+// Auto-refresh every 10 seconds
+setInterval(() => { loadHealth(); loadPrinters(); loadQueueStats(); }, 10000);
+</script>
+</body>
+</html>
