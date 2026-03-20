@@ -249,7 +249,24 @@
 </div>
 
 <script>
-const API = window.location.origin;
+let API = window.location.origin;
+
+// When opened as a local file, auto-discover the running service port
+if (window.location.protocol === 'file:') {
+  API = 'http://127.0.0.1:9100'; // will be resolved by discoverPort()
+}
+
+async function discoverPort() {
+  if (window.location.protocol !== 'file:') return;
+  const base = 9100;
+  for (let i = 0; i < 10; i++) {
+    const url = `http://127.0.0.1:${base + i}`;
+    try {
+      const r = await fetch(url + '/health', { signal: AbortSignal.timeout(500) });
+      if (r.ok) { API = url; return; }
+    } catch {}
+  }
+}
 
 // ── Helpers ──
 async function api(method, path, body) {
@@ -540,10 +557,13 @@ async function savePrinter() {
 }
 
 // ── Init ──
-loadHealth();
-loadPrinters();
-loadConfig();
-loadQueueStats();
+(async () => {
+  await discoverPort();
+  loadHealth();
+  loadPrinters();
+  loadConfig();
+  loadQueueStats();
+})();
 
 // Auto-refresh every 10 seconds
 setInterval(() => { loadHealth(); loadPrinters(); loadQueueStats(); }, 10000);

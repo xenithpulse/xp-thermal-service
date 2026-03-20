@@ -151,7 +151,7 @@ export class ThermalPrintService extends EventEmitter {
       // Initialize components
       this.initialize();
 
-      // Start the API server
+      // Start the API server (smart port handling)
       await this.apiServer.start();
 
       // Start the job processor
@@ -161,11 +161,15 @@ export class ThermalPrintService extends EventEmitter {
       this.emit(ServiceEvent.SERVICE_STARTED, { timestamp: Date.now() });
       
       // Log startup summary
+      const activePort = this.apiServer.getActivePort();
       const printerSummary = this.printerManager.getSummary();
       this.logger.info({
         printers: printerSummary,
-        port: this.config.getServerConfig().port
+        configuredPort: this.config.getServerConfig().port,
+        activePort
       }, 'XP Thermal Service started successfully');
+
+      console.log(`\n  XP Thermal Service is running on http://${this.config.getServerConfig().host}:${activePort}\n`);
 
     } catch (error) {
       this.logger.error({ error }, 'Failed to start service');
@@ -273,6 +277,12 @@ export class ThermalPrintService extends EventEmitter {
  * Main entry point
  */
 async function main(): Promise<void> {
+  // When running as a Windows service, CWD is not the project directory
+  // (e.g. C:\Windows\System32). Anchor CWD to the project root so that
+  // relative paths (config.json, data/jobs.db, logs) resolve correctly.
+  const projectRoot = path.resolve(__dirname, '..');
+  process.chdir(projectRoot);
+
   // Check for CLI arguments
   const args = process.argv.slice(2);
   

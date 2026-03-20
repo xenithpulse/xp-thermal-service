@@ -659,31 +659,60 @@ export class ApiServer {
     });
   }
 
+  private activePort: number = 0;
+  private static readonly MAX_PORT_ATTEMPTS = 10;
+
   /**
-   * Start the API server
+   * Get the port the server is actually listening on
    */
-  start(): Promise<void> {
-    return new Promise((resolve, reject) => {
+  getActivePort(): number {
+    return this.activePort;
+  }
+
+  /**
+   * Start the API server with smart port handling.
+   * If the configured port is in use, automatically tries subsequent ports.
+   */
+  async start(): Promise<void> {
+    const basePort = this.config.port;
+
+    for (let attempt = 0; attempt < ApiServer.MAX_PORT_ATTEMPTS; attempt++) {
+      const port = basePort + attempt;
       try {
-        this.server = this.app.listen(
-          this.config.port,
-          this.config.host,
-          () => {
-            this.logger.info(
-              `API server listening on http://${this.config.host}:${this.config.port}`
-            );
-            resolve();
-          }
+        await this.tryListen(this.config.host, port);
+        this.activePort = port;
+        if (attempt > 0) {
+          this.logger.warn(
+            `Configured port ${basePort} was in use — switched to port ${port}`
+          );
+        }
+        this.logger.info(
+          `API server listening on http://${this.config.host}:${port}`
         );
-
-        this.server.on('error', (error) => {
-          this.logger.error({ error }, 'Server error');
-          reject(error);
-        });
-
-      } catch (error) {
-        reject(error);
+        return;
+      } catch (error: any) {
+        if (error.code === 'EADDRINUSE') {
+          this.logger.warn(`Port ${port} is in use, trying next…`);
+          continue;
+        }
+        throw error;
       }
+    }
+
+    throw new Error(
+      `All ports ${basePort}–${basePort + ApiServer.MAX_PORT_ATTEMPTS - 1} are in use`
+    );
+  }
+
+  private tryListen(host: string, port: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = this.app.listen(port, host, () => {
+        this.server = server;
+        resolve();
+      });
+      server.on('error', (error) => {
+        reject(error);
+      });
     });
   }
 

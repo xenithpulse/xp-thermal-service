@@ -8,6 +8,7 @@ declare module 'node-windows' {
     maxRestarts?: number;
     wait?: number;
     grow?: number;
+    workingDirectory?: string;
   }
 
   export class Service {

@@ -38,6 +38,8 @@ export class WindowsServiceManager {
     };
 
     if (Service) {
+      const projectRoot = path.resolve(__dirname, '..', '..');
+
       this.service = new Service({
         name: this.options.name!,
         description: this.options.description,
@@ -48,7 +50,9 @@ export class WindowsServiceManager {
         // Restart on failure
         maxRestarts: 3,
         wait: 2,
-        grow: 0.5
+        grow: 0.5,
+        // Ensure the service runs from the project root so relative paths work
+        workingDirectory: projectRoot
       }) as InstanceType<typeof Service>;
     }
   }
