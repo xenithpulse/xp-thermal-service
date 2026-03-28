@@ -155,10 +155,36 @@
       <div class="actions">
         <button class="btn btn-outline btn-sm" onclick="pauseQueue()">Pause</button>
         <button class="btn btn-outline btn-sm" onclick="resumeQueue()">Resume</button>
+        <button class="btn btn-danger btn-sm" onclick="clearFailedJobs()">Clear Failed</button>
       </div>
     </div>
     <div class="card-body">
       <div class="stats" id="queueStats"></div>
+    </div>
+  </div>
+
+  <!-- System Info Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>System Info</h2>
+      <button class="btn btn-outline btn-sm" onclick="loadSystemInfo()">Refresh</button>
+    </div>
+    <div class="card-body">
+      <div class="stats" id="systemStats"></div>
+    </div>
+  </div>
+
+  <!-- Recent Jobs Card -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Recent Jobs</h2>
+      <button class="btn btn-outline btn-sm" onclick="loadJobs()">Refresh</button>
+    </div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>ID</th><th>Printer</th><th>Type</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody id="jobsTable"></tbody>
+      </table>
     </div>
   </div>
 
@@ -336,6 +362,68 @@ async function loadQueueStats() {
 
 async function pauseQueue() { await api('POST', '/api/queue/pause'); toast('Queue paused'); loadQueueStats(); }
 async function resumeQueue() { await api('POST', '/api/queue/resume'); toast('Queue resumed'); loadQueueStats(); }
+async function clearFailedJobs() {
+  if (!confirm('Clear all failed jobs? This cannot be undone.')) return;
+  try {
+    const d = await api('POST', '/api/jobs/clear-failed');
+    toast(`Cleared ${d.count} failed jobs`);
+    loadQueueStats();
+    loadJobs();
+  } catch { toast('Failed to clear jobs', 'error'); }
+}
+
+// ── System Info ──
+async function loadSystemInfo() {
+  try {
+    const d = await api('GET', '/api/system/info');
+    const conn = await api('GET', '/api/system/connections');
+    document.getElementById('systemStats').innerHTML = `
+      <div class="stat"><div class="val">${d.memory.heapUsed}MB</div><div class="lbl">Heap Used</div></div>
+      <div class="stat"><div class="val">${d.memory.rss}MB</div><div class="lbl">RSS Memory</div></div>
+      <div class="stat"><div class="val">${conn.activeConnections}</div><div class="lbl">Connections</div></div>
+      <div class="stat"><div class="val">${d.nodeVersion}</div><div class="lbl">Node.js</div></div>
+      <div class="stat"><div class="val">${d.platform}</div><div class="lbl">Platform</div></div>
+    `;
+  } catch {
+    document.getElementById('systemStats').innerHTML = '<div style="color:#aaa;text-align:center;padding:12px">Unable to load system info</div>';
+  }
+}
+
+// ── Jobs ──
+async function loadJobs() {
+  try {
+    const d = await api('GET', '/api/jobs?limit=20');
+    const tbody = document.getElementById('jobsTable');
+    if (!d.jobs || d.jobs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">No recent jobs</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.jobs.map(j => {
+      const statusCls = j.status === 'completed' ? 'online' : j.status === 'failed' || j.status === 'dead_letter' ? 'offline' : 'error';
+      const created = new Date(j.createdAt).toLocaleString();
+      const canRetry = j.status === 'failed' || j.status === 'dead_letter';
+      return `<tr>
+        <td style="font-size:11px;font-family:monospace">${esc(j.id.substring(0,8))}...</td>
+        <td>${esc(j.printerId)}</td>
+        <td>${esc(j.templateType)}</td>
+        <td><span class="badge ${statusCls}">${esc(j.status)}</span></td>
+        <td style="font-size:11px">${created}</td>
+        <td class="actions">
+          ${canRetry ? `<button class="btn btn-outline btn-sm" onclick="retryJob('${esc(j.id)}')">Retry</button>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+async function retryJob(id) {
+  try {
+    await api('POST', `/api/jobs/${id}/retry`);
+    toast('Job scheduled for retry');
+    loadJobs();
+    loadQueueStats();
+  } catch { toast('Failed to retry job', 'error'); }
+}
 
 // ── Printers ──
 async function loadPrinters() {
@@ -359,6 +447,7 @@ async function loadPrinters() {
         <td><span class="badge ${statusCls}">${esc(p.status)}</span></td>
         <td class="actions">
           <button class="btn btn-outline btn-sm" onclick="testPrinter('${esc(p.id)}')">Test</button>
+          <button class="btn btn-outline btn-sm" onclick="reconnectPrinter('${esc(p.id)}')">Reconnect</button>
           <button class="btn btn-outline btn-sm" onclick="editPrinter('${esc(p.id)}')">Edit</button>
           <button class="btn btn-danger btn-sm" onclick="deletePrinter('${esc(p.id)}')">Del</button>
         </td>
@@ -372,6 +461,14 @@ async function testPrinter(id) {
     await api('POST', `/api/printers/${id}/test`, {});
     toast('Test print sent to ' + id);
   } catch { toast('Test print failed', 'error'); }
+}
+
+async function reconnectPrinter(id) {
+  try {
+    await api('POST', `/api/printers/${id}/reconnect`, {});
+    toast('Reconnecting ' + id + '...');
+    setTimeout(loadPrinters, 2000);
+  } catch { toast('Reconnect failed', 'error'); }
 }
 
 async function deletePrinter(id) {
@@ -563,10 +660,18 @@ async function savePrinter() {
   loadPrinters();
   loadConfig();
   loadQueueStats();
+  loadSystemInfo();
+  loadJobs();
 })();
 
 // Auto-refresh every 10 seconds
-setInterval(() => { loadHealth(); loadPrinters(); loadQueueStats(); }, 10000);
+setInterval(() => { 
+  loadHealth(); 
+  loadPrinters(); 
+  loadQueueStats(); 
+  loadSystemInfo();
+  loadJobs();
+}, 10000);
 </script>
 </body>
 </html>

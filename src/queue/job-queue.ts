@@ -353,6 +353,54 @@ export class JobQueue extends EventEmitter {
   }
 
   /**
+   * Retry a failed or dead-letter job
+   */
+  retryJob(jobId: string): boolean {
+    const job = this.store.getById(jobId);
+    if (!job) {
+      return false;
+    }
+
+    // Can only retry failed or dead-letter jobs
+    if (job.status !== JobStatus.FAILED && job.status !== JobStatus.DEAD_LETTER) {
+      return false;
+    }
+
+    // Reset the job to pending state
+    this.store.update({
+      ...job,
+      status: JobStatus.PENDING,
+      attempts: 0,
+      error: null,
+      scheduledAt: null,
+      updatedAt: Date.now()
+    });
+
+    this.logger.info(`Job ${jobId} scheduled for retry`);
+    this.emit(ServiceEvent.JOB_RETRY, { jobId, attempt: 0, delay: 0 });
+    return true;
+  }
+
+  /**
+   * Clear all failed and dead-letter jobs
+   */
+  clearFailedJobs(): number {
+    const failed = this.store.getByStatus(JobStatus.FAILED, 1000);
+    const deadLetter = this.store.getByStatus(JobStatus.DEAD_LETTER, 1000);
+    
+    const allFailed = [...failed, ...deadLetter];
+    let count = 0;
+
+    for (const job of allFailed) {
+      this.store.delete(job.id);
+      count++;
+    }
+
+    this.logger.info(`Cleared ${count} failed jobs`);
+    return count;
+  }
+
+  /**
    * Close the queue
    */
   close(): void {

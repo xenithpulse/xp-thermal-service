@@ -474,6 +474,43 @@ export class PrinterManager extends EventEmitter {
   }
 
   /**
+   * Reconnect to a specific printer
+   */
+  async reconnect(printerId: string): Promise<void> {
+    const adapter = this.printers.get(printerId);
+    if (!adapter) {
+      throw new PrintServiceError(
+        `Printer not found: ${printerId}`,
+        ErrorCodes.PRINTER_NOT_FOUND,
+        404
+      );
+    }
+
+    const config = this.configs.get(printerId)!;
+    if (!config.enabled) {
+      throw new PrintServiceError(
+        `Printer is disabled: ${printerId}`,
+        ErrorCodes.PRINTER_OFFLINE,
+        400
+      );
+    }
+
+    this.logger.info(`Reconnecting printer: ${printerId}`);
+    
+    // Disconnect first if connected
+    if (adapter.isConnected()) {
+      await adapter.disconnect();
+    }
+    
+    // Wait a bit before reconnecting
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Connect again
+    await adapter.connect();
+    this.logger.info(`Printer ${printerId} reconnected`);
+  }
+
+  /**
    * Graceful shutdown
    */
   async shutdown(): Promise<void> {

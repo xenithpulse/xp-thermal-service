@@ -4,6 +4,7 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
 import { EventEmitter } from 'events';
 
 import { ConfigManager } from './utils/config';
@@ -14,7 +15,6 @@ import { JobQueue } from './queue/job-queue';
 import { JobProcessor } from './queue/processor';
 import { TemplateEngine } from './templates/engine';
 import { ApiServer } from './api/server';
-import { WindowsServiceManager } from './service/installer';
 import { ServiceEvent } from './types';
 
 export class ThermalPrintService extends EventEmitter {
@@ -169,6 +169,9 @@ export class ThermalPrintService extends EventEmitter {
         activePort
       }, 'XP Thermal Service started successfully');
 
+      // Write active port to file for external discovery
+      this.writeActivePortFile(activePort);
+
       console.log(`\n  XP Thermal Service is running on http://${this.config.getServerConfig().host}:${activePort}\n`);
 
     } catch (error) {
@@ -233,6 +236,31 @@ export class ThermalPrintService extends EventEmitter {
   }
 
   /**
+   * Write the active port to a file for external discovery.
+   * This allows other applications to find the service even if it's running on a non-default port.
+   */
+  private writeActivePortFile(port: number): void {
+    try {
+      const portFile = path.join(process.cwd(), 'data', 'active_port.txt');
+      const portDir = path.dirname(portFile);
+      
+      // Ensure data directory exists
+      if (!fs.existsSync(portDir)) {
+        fs.mkdirSync(portDir, { recursive: true });
+      }
+      
+      // Write port atomically (write to temp, then rename)
+      const tempFile = `${portFile}.tmp`;
+      fs.writeFileSync(tempFile, port.toString(), 'utf8');
+      fs.renameSync(tempFile, portFile);
+      
+      this.logger.debug({ portFile, port }, 'Active port file written');
+    } catch (error) {
+      this.logger.warn({ error }, 'Failed to write active port file');
+    }
+  }
+
+  /**
    * Get service status
    */
   getStatus(): {
@@ -272,6 +300,22 @@ export class ThermalPrintService extends EventEmitter {
     return this.jobQueue;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Production Hardening Constants
+// ─────────────────────────────────────────────────────────────────────────────
+const PRODUCTION_CONFIG = {
+  // Startup delay when running as Windows service (allows system to stabilize)
+  serviceStartupDelayMs: 5000,
+  // Memory threshold for warning (512MB)
+  memoryWarningThresholdMB: 512,
+  // Memory threshold for restart suggestion (1GB)
+  memoryRestartThresholdMB: 1024,
+  // Heartbeat interval for logging service health
+  heartbeatIntervalMs: 60000, // 1 minute
+  // GC interval hint (V8 will decide)
+  gcHintIntervalMs: 300000, // 5 minutes
+};
 
 /**
  * Main entry point
@@ -316,6 +360,15 @@ For more information, see the documentation.
     process.exit(0);
   }
 
+  // When running as Windows service, add startup delay to let system stabilize
+  const isService = process.env.NODE_ENV === 'production' || 
+                    process.cwd().includes('ProgramData');
+  
+  if (isService) {
+    console.log(`Service startup delay (${PRODUCTION_CONFIG.serviceStartupDelayMs}ms)...`);
+    await new Promise(resolve => setTimeout(resolve, PRODUCTION_CONFIG.serviceStartupDelayMs));
+  }
+
   // Get config path from args or environment
   let configPath: string | undefined;
   const configIndex = args.indexOf('--config');
@@ -327,38 +380,127 @@ For more information, see the documentation.
 
   // Create and start service
   const service = new ThermalPrintService(configPath);
+  let isShuttingDown = false;
 
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {
-    console.log(`\nReceived ${signal}, shutting down...`);
-    await service.stop();
-    process.exit(0);
+    if (isShuttingDown) {
+      console.log('Shutdown already in progress...');
+      return;
+    }
+    isShuttingDown = true;
+    console.log(`\nReceived ${signal}, shutting down gracefully...`);
+    
+    // Set a deadline for graceful shutdown
+    const forceExitTimer = setTimeout(() => {
+      console.error('Graceful shutdown timed out, forcing exit');
+      process.exit(1);
+    }, 15000);
+    
+    try {
+      await service.stop();
+      clearTimeout(forceExitTimer);
+      console.log('Shutdown complete');
+      process.exit(0);
+    } catch (error) {
+      console.error('Error during shutdown:', error);
+      clearTimeout(forceExitTimer);
+      process.exit(1);
+    }
   };
 
+  // Register signal handlers (works on all platforms)
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  
+  // Windows-specific: handle Ctrl+C and process termination
+  if (process.platform === 'win32') {
+    process.on('SIGHUP', () => shutdown('SIGHUP'));
+    // Windows service stop signal
+    process.on('message', (msg) => {
+      if (msg === 'shutdown') {
+        shutdown('SERVICE_STOP');
+      }
+    });
+  }
 
-  // Handle uncaught errors — exit immediately, let service manager restart
+  // Handle uncaught errors — log and exit, let service manager restart
   process.on('uncaughtException', (error) => {
-    console.error('Uncaught exception:', error);
-    process.exit(1);
+    console.error('FATAL: Uncaught exception:', error);
+    // Give time for logs to flush
+    setTimeout(() => process.exit(1), 1000);
   });
 
-  process.on('unhandledRejection', (reason) => {
-    console.error('Unhandled rejection:', reason);
-    process.exit(1);
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('FATAL: Unhandled rejection at:', promise, 'reason:', reason);
+    // Give time for logs to flush
+    setTimeout(() => process.exit(1), 1000);
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Memory Monitoring (production only)
+  // ─────────────────────────────────────────────────────────────────────────
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  let gcHintTimer: NodeJS.Timeout | null = null;
+
+  const startHealthMonitoring = () => {
+    // Heartbeat logging
+    heartbeatTimer = setInterval(() => {
+      const mem = process.memoryUsage();
+      const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
+      const rssMB = Math.round(mem.rss / 1024 / 1024);
+      
+      // Check memory thresholds
+      if (rssMB > PRODUCTION_CONFIG.memoryRestartThresholdMB) {
+        console.warn(`MEMORY WARNING: RSS ${rssMB}MB exceeds restart threshold. Consider restarting service.`);
+      } else if (rssMB > PRODUCTION_CONFIG.memoryWarningThresholdMB) {
+        console.warn(`MEMORY WARNING: RSS ${rssMB}MB exceeds warning threshold.`);
+      }
+      
+      // Log heartbeat with service status
+      const status = service.getStatus();
+      console.log(`[HEARTBEAT] Uptime: ${Math.round(status.uptime)}s | Heap: ${heapUsedMB}MB | RSS: ${rssMB}MB | Printers: ${status.printers.online}/${status.printers.total} | Queue: ${status.queue.pending} pending`);
+    }, PRODUCTION_CONFIG.heartbeatIntervalMs);
+
+    // GC hints (if manual GC is exposed via --expose-gc)
+    if (typeof global.gc === 'function') {
+      gcHintTimer = setInterval(() => {
+        try {
+          (global.gc as () => void)();
+        } catch {
+          // GC not exposed or failed
+        }
+      }, PRODUCTION_CONFIG.gcHintIntervalMs);
+    }
+  };
+
+  const stopHealthMonitoring = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    if (gcHintTimer) {
+      clearInterval(gcHintTimer);
+      gcHintTimer = null;
+    }
+  };
 
   try {
     await service.start();
     
-    // If running as Windows service, don't log to console
-    if (!WindowsServiceManager.isRunningAsService()) {
+    // Start health monitoring in production
+    if (isService || process.env.NODE_ENV === 'production') {
+      startHealthMonitoring();
+    }
+    
+    // If running interactively, show startup message
+    if (!isService) {
       console.log('\nXP Thermal Service is running.');
       console.log('Press Ctrl+C to stop.\n');
     }
   } catch (error) {
-    console.error('Failed to start service:', error);
+    console.error('FATAL: Failed to start service:', error);
+    stopHealthMonitoring();
     process.exit(1);
   }
 }

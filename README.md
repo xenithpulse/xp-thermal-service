@@ -268,9 +268,163 @@ npm run lint
 ## System Requirements
 
 - Node.js 18+
-- Windows 10/11 (for Windows service)
+- Windows 7/10/11 (for Windows service)
 - USB drivers for USB printers
 - Network access for LAN printers
+
+## Deployment to Client PCs
+
+### Installation (Administrator Required)
+
+```powershell
+# 1. Build the service
+npm run build
+
+# 2. Install as Windows service (Run PowerShell as Admin)
+cd scripts
+.\install.ps1
+
+# The installer will:
+# - Copy files to C:\ProgramData\XPThermalService
+# - Register the Windows service with auto-start
+# - Configure service recovery (restart on failure)
+# - Add firewall rule for port 9100
+# - Verify the service is running
+```
+
+### Verify Installation
+
+```powershell
+# Run diagnostics (no admin required)
+.\scripts\diagnose.ps1
+
+# Run with auto-fix for common issues (admin required)
+.\scripts\diagnose.ps1 -Fix
+```
+
+### Service Management
+
+```powershell
+# Start/Stop/Restart
+.\scripts\install.ps1 -Start
+.\scripts\install.ps1 -Stop
+.\scripts\install.ps1 -Restart
+
+# Uninstall
+.\scripts\install.ps1 -Uninstall
+
+# Check status
+Get-Service "XP Thermal Print Service"
+```
+
+### Auto-Start Behavior
+
+The service is configured to:
+- Start automatically on Windows boot
+- Restart automatically on failure (after 5s, 10s, 30s delays)
+- Write the active port to `C:\ProgramData\XPThermalService\data\active_port.txt`
+
+## Smart Port Handling
+
+The service uses smart port allocation:
+
+1. **Service Side**: If port 9100 is in use, automatically tries 9101, 9102, etc.
+2. **Client Side**: The ThermalPrintAdapter scans ports 9100-9109 to find the service
+3. **Port Persistence**: The discovered port is cached in localStorage
+
+This ensures connectivity even if:
+- Another application is using port 9100
+- The service restarts on a different port
+- Multiple instances exist (not recommended)
+
+## Connecting from XP-POS
+
+### ThermalPrintAdapter Integration
+
+```typescript
+import { getThermalAdapter, ThermalPrintService } from './printing-facility';
+
+// Initialize the print service (singleton)
+const printService = ThermalPrintService.getInstance({
+  autoReconnect: true,
+  reconnectInterval: 5000,
+  healthCheckInterval: 30000,
+  onConnectionChange: (connected) => {
+    console.log(`Thermal service: ${connected ? 'connected' : 'disconnected'}`);
+  }
+});
+
+// Initialize and check connection
+await printService.initialize();
+
+if (printService.isConnected()) {
+  // Print a bill
+  const result = await printService.printBill(billData, {
+    copies: 2,
+    openCashDrawer: true
+  });
+  
+  console.log('Print job:', result.jobId);
+}
+```
+
+### Connection Recovery
+
+The adapter automatically:
+- Caches the last successful port in localStorage
+- Probes cached port first on reconnection
+- Scans port range if cached port fails
+- Retries with exponential backoff on failures
+
+### Manual Reconnection
+
+```typescript
+// Force reconnect with port re-discovery
+await printService.reconnect();
+
+// Get current service URL (for debugging)
+console.log('Service URL:', printService.getServiceUrl());
+```
+
+## Troubleshooting
+
+### Service Won't Start
+
+1. Run diagnostics: `.\scripts\diagnose.ps1`
+2. Check logs: `C:\ProgramData\XPThermalService\logs\`
+3. Verify Node.js is in PATH
+4. Check Windows Event Viewer for errors
+
+### POS Can't Connect
+
+1. Verify service is running: `Get-Service "XP Thermal Print Service"`
+2. Check dashboard: `http://127.0.0.1:9100/dashboard`
+3. Test health endpoint: `curl http://127.0.0.1:9100/health`
+4. Check CORS config includes your POS origin
+
+### Printer Not Printing
+
+1. Verify printer is online in dashboard
+2. Test print from dashboard
+3. Check if printer name matches Windows printer exactly
+4. For network printers, verify IP and port
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| Port 9100 in use | Service auto-switches ports; check dashboard for actual port |
+| Service crashes on boot | Check logs; may be config.json syntax error |
+| CORS errors | Add POS URL to `security.allowedOrigins` in config.json |
+| Printer offline | Verify Windows can print test page; check printer name spelling |
+
+## Security Notes
+
+- Service binds to localhost (127.0.0.1) by default
+- CORS headers restrict cross-origin access
+- Rate limiting prevents abuse (120 req/min default)
+- API key optional for additional security
+- No external network access required
 
 ## License
 

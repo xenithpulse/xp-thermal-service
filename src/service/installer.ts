@@ -47,10 +47,10 @@ export class WindowsServiceManager {
         env: this.options.env,
         // Service configuration
         nodeOptions: ['--max-old-space-size=256'],
-        // Restart on failure
-        maxRestarts: 3,
-        wait: 2,
-        grow: 0.5,
+        // Enhanced restart/recovery settings for production reliability
+        maxRestarts: 10,        // Allow more restarts before giving up
+        wait: 5,                // 5 seconds between restart attempts
+        grow: 0.5,              // Grow wait time by 50% each failure
         // Ensure the service runs from the project root so relative paths work
         workingDirectory: projectRoot
       }) as InstanceType<typeof Service>;

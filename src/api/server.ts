@@ -1,15 +1,17 @@
 /**
  * HTTP API Server
  * Secure local API for print job submission
+ * Production-grade with connection handling, rate limiting, and error recovery
  */
 
 import express, { Express, Request, Response, NextFunction } from 'express';
+import * as http from 'http';
 import * as path from 'path';
 import * as fs from 'fs';
 import cors from 'cors';
 import helmet from 'helmet';
 import { z } from 'zod';
-import { RateLimiterMemory } from 'rate-limiter-flexible';
+import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { JobQueue } from '../queue/job-queue';
 import { PrinterManager } from '../printers/printer-manager';
 import { JobProcessor } from '../queue/processor';
@@ -46,16 +48,31 @@ export interface ApiServerConfig {
   configManager: ConfigManager;
 }
 
+// Production server configuration
+const SERVER_CONFIG = {
+  // Connection handling
+  keepAliveTimeout: 65000,        // Slightly higher than typical LB timeout (60s)
+  headersTimeout: 66000,          // Must be higher than keepAliveTimeout
+  requestTimeout: 30000,          // Max time for request processing
+  maxConnections: 100,            // Max concurrent connections
+  
+  // Shutdown handling
+  gracefulShutdownTimeout: 10000, // Max wait time during shutdown
+};
+
 export class ApiServer {
   private app: Express;
-  private server: import('http').Server | null = null;
+  private server: http.Server | null = null;
   private queue: JobQueue;
   private printerManager: PrinterManager;
   private processor: JobProcessor;
   private logger: Logger;
   private config: ApiServerConfig;
-  private rateLimiter: RateLimiterMemory;
+  private rateLimiter!: RateLimiterMemory;
+  private burstLimiter!: RateLimiterMemory;
   private startTime: number = Date.now();
+  private activeConnections: Set<import('net').Socket> = new Set();
+  private isShuttingDown: boolean = false;
 
   constructor(
     queue: JobQueue,
@@ -70,10 +87,17 @@ export class ApiServer {
     this.config = config;
     this.logger = logger;
 
-    // Initialize rate limiter
+    // Initialize rate limiter with burst support
     this.rateLimiter = new RateLimiterMemory({
       points: config.security.rateLimitPerMinute,
-      duration: 60
+      duration: 60,
+      blockDuration: 60,           // Block for 60s when limit exceeded
+    });
+    
+    // Burst limiter for short-term spikes (e.g., 20 requests in 1 second)
+    this.burstLimiter = new RateLimiterMemory({
+      points: 20,
+      duration: 1,
     });
 
     this.app = express();
@@ -119,6 +143,12 @@ export class ApiServer {
       limit: this.config.security.maxPayloadSize 
     }));
 
+    // Shutdown awareness - reject new requests during shutdown
+    this.app.use(this.checkShutdown.bind(this));
+
+    // Request timeout middleware
+    this.app.use(this.requestTimeout.bind(this));
+
     // Request logging
     this.app.use((req: Request, _res: Response, next: NextFunction) => {
       this.logger.debug({ 
@@ -156,7 +186,50 @@ export class ApiServer {
     next();
   }
 
+  /**
+   * Reject requests when shutting down
+   */
+  private checkShutdown(_req: Request, res: Response, next: NextFunction): void {
+    if (this.isShuttingDown) {
+      res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'Service is shutting down'
+      });
+      return;
+    }
+    next();
+  }
+
+  /**
+   * Request timeout middleware
+   */
+  private requestTimeout(req: Request, res: Response, next: NextFunction): void {
+    // Skip timeout for streaming endpoints
+    if (req.path === '/api/logs/stream') {
+      return next();
+    }
+
+    const timeout = setTimeout(() => {
+      if (!res.headersSent) {
+        this.logger.warn({ path: req.path, method: req.method }, 'Request timeout');
+        res.status(408).json({
+          error: 'Request Timeout',
+          message: 'Request took too long to process'
+        });
+      }
+    }, SERVER_CONFIG.requestTimeout);
+
+    res.on('finish', () => clearTimeout(timeout));
+    res.on('close', () => clearTimeout(timeout));
+    next();
+  }
+
   private validateApiKey(req: Request, res: Response, next: NextFunction): void {
+    // Skip API key validation for health checks
+    if (req.path === '/health' || req.path === '/api/health') {
+      return next();
+    }
+
     const apiKey = req.get('X-API-Key');
     
     if (!apiKey || apiKey !== this.config.security.apiKey) {
@@ -171,16 +244,35 @@ export class ApiServer {
     next();
   }
 
+  /**
+   * Rate limiting with burst protection
+   */
   private async rateLimit(req: Request, res: Response, next: NextFunction): Promise<void> {
+    // Skip rate limiting for health checks
+    if (req.path === '/health' || req.path === '/api/health') {
+      return next();
+    }
+
+    const key = req.ip || 'unknown';
+
     try {
-      const key = req.ip || 'unknown';
+      // Check burst limit first (prevents rapid-fire requests)
+      await this.burstLimiter.consume(key);
+      // Then check the per-minute limit
       await this.rateLimiter.consume(key);
       next();
-    } catch {
-      this.logger.warn({ ip: req.ip }, 'Rate limit exceeded');
+    } catch (rateLimiterRes) {
+      const retryAfter = rateLimiterRes instanceof RateLimiterRes
+        ? Math.ceil(rateLimiterRes.msBeforeNext / 1000)
+        : 60;
+      
+      this.logger.warn({ ip: key, retryAfter }, 'Rate limit exceeded');
+      
+      res.set('Retry-After', String(retryAfter));
       res.status(429).json({
         error: 'Too Many Requests',
-        message: 'Rate limit exceeded. Please try again later.'
+        message: 'Rate limit exceeded. Please try again later.',
+        retryAfter
       });
     }
   }
@@ -199,20 +291,25 @@ export class ApiServer {
     this.app.get('/api/jobs/:jobId/status', this.handleGetJobStatus.bind(this));
     this.app.delete('/api/jobs/:jobId', this.handleCancelJob.bind(this));
     this.app.get('/api/jobs', this.handleListJobs.bind(this));
+    this.app.post('/api/jobs/:jobId/retry', this.handleRetryJob.bind(this));
+    this.app.post('/api/jobs/clear-failed', this.handleClearFailedJobs.bind(this));
 
     // Printer endpoints
     this.app.get('/api/printers', this.handleListPrinters.bind(this));
     this.app.get('/api/printers/:printerId', this.handleGetPrinter.bind(this));
     this.app.get('/api/printers/:printerId/status', this.handleGetPrinterStatus.bind(this));
     this.app.post('/api/printers/:printerId/test', this.handleTestPrinter.bind(this));
+    this.app.post('/api/printers/:printerId/reconnect', this.handleReconnectPrinter.bind(this));
 
     // Queue management
     this.app.get('/api/queue/stats', this.handleQueueStats.bind(this));
     this.app.post('/api/queue/pause', this.handlePauseQueue.bind(this));
     this.app.post('/api/queue/resume', this.handleResumeQueue.bind(this));
 
-    // Metrics
+    // Metrics and system info
     this.app.get('/api/metrics', this.handleMetrics.bind(this));
+    this.app.get('/api/system/info', this.handleSystemInfo.bind(this));
+    this.app.get('/api/system/connections', this.handleConnectionStats.bind(this));
 
     // Configuration management
     this.app.get('/api/config', this.handleGetConfig.bind(this));
@@ -512,6 +609,97 @@ export class ApiServer {
     res.json({ success: true, message: 'Queue resumed' });
   }
 
+  // ── New Job Management Handlers ──
+
+  private handleRetryJob(req: Request, res: Response): void {
+    try {
+      const { jobId } = req.params;
+      const result = this.queue.retryJob(jobId);
+      
+      if (result) {
+        res.json({ success: true, message: 'Job scheduled for retry', jobId });
+      } else {
+        res.status(404).json({
+          error: 'Not Found',
+          message: `Job not found or not in a retryable state: ${jobId}`
+        });
+      }
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  private handleClearFailedJobs(_req: Request, res: Response): void {
+    try {
+      const count = this.queue.clearFailedJobs();
+      res.json({ success: true, message: `Cleared ${count} failed jobs`, count });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  private async handleReconnectPrinter(req: Request, res: Response): Promise<void> {
+    try {
+      const { printerId } = req.params;
+      const printer = this.printerManager.getPrinter(printerId);
+      
+      if (!printer) {
+        res.status(404).json({
+          error: 'Not Found',
+          message: `Printer not found: ${printerId}`
+        });
+        return;
+      }
+
+      await this.printerManager.reconnect(printerId);
+      res.json({ success: true, message: `Reconnecting printer: ${printerId}` });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  // ── System Info Handlers ──
+
+  private handleSystemInfo(_req: Request, res: Response): void {
+    try {
+      const memUsage = process.memoryUsage();
+      const cpuUsage = process.cpuUsage();
+      
+      res.json({
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        pid: process.pid,
+        uptime: process.uptime(),
+        memory: {
+          heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
+          heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+          external: Math.round(memUsage.external / 1024 / 1024),
+          rss: Math.round(memUsage.rss / 1024 / 1024)
+        },
+        cpu: {
+          user: Math.round(cpuUsage.user / 1000),
+          system: Math.round(cpuUsage.system / 1000)
+        },
+        cwd: process.cwd()
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  private handleConnectionStats(_req: Request, res: Response): void {
+    try {
+      res.json({
+        activeConnections: this.activeConnections.size,
+        maxConnections: SERVER_CONFIG.maxConnections,
+        isShuttingDown: this.isShuttingDown
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
   private handleMetrics(_req: Request, res: Response): void {
     try {
       const queueStats = this.queue.getStats();
@@ -708,6 +896,20 @@ export class ApiServer {
     return new Promise((resolve, reject) => {
       const server = this.app.listen(port, host, () => {
         this.server = server;
+        
+        // Configure server timeouts for production
+        server.keepAliveTimeout = SERVER_CONFIG.keepAliveTimeout;
+        server.headersTimeout = SERVER_CONFIG.headersTimeout;
+        server.maxConnections = SERVER_CONFIG.maxConnections;
+        
+        // Track connections for graceful shutdown
+        server.on('connection', (socket) => {
+          this.activeConnections.add(socket);
+          socket.on('close', () => {
+            this.activeConnections.delete(socket);
+          });
+        });
+        
         resolve();
       });
       server.on('error', (error) => {
@@ -717,21 +919,63 @@ export class ApiServer {
   }
 
   /**
-   * Stop the API server
+   * Stop the API server gracefully
+   * - Stops accepting new connections
+   * - Waits for active connections to complete
+   * - Forces close after timeout
    */
-  stop(): Promise<void> {
-    return new Promise((resolve) => {
-      if (!this.server) {
-        resolve();
-        return;
-      }
+  async stop(): Promise<void> {
+    if (!this.server) {
+      return;
+    }
 
-      this.server.close(() => {
+    this.isShuttingDown = true;
+    this.logger.info('Initiating graceful shutdown...');
+
+    return new Promise((resolve) => {
+      // Stop accepting new connections
+      this.server!.close(() => {
         this.logger.info('API server stopped');
         this.server = null;
         resolve();
       });
+
+      // Set deadline for graceful shutdown
+      const deadline = Date.now() + SERVER_CONFIG.gracefulShutdownTimeout;
+      
+      const checkConnections = () => {
+        if (this.activeConnections.size === 0 || Date.now() > deadline) {
+          // Force close remaining connections
+          if (this.activeConnections.size > 0) {
+            this.logger.warn(`Forcing close of ${this.activeConnections.size} connections`);
+            for (const socket of this.activeConnections) {
+              socket.destroy();
+            }
+            this.activeConnections.clear();
+          }
+          return;
+        }
+        
+        this.logger.debug(`Waiting for ${this.activeConnections.size} connections to close...`);
+        setTimeout(checkConnections, 100);
+      };
+      
+      checkConnections();
     });
+  }
+
+  /**
+   * Check if server is shutting down
+   */
+  isShuttingDownNow(): boolean {
+    return this.isShuttingDown;
+  }
+
+  /**
+   * Get active connection count
+   */
+  getConnectionCount(): number {
+    return this.activeConnections.size;
   }
 
   /**

@@ -14,6 +14,8 @@ $ServiceName = "XPThermalService"
 $ServiceDisplayName = "XP Thermal Print Service"
 $ServiceDescription = "Production-grade thermal printing service for restaurant POS systems"
 $InstallPath = "$env:ProgramData\XPThermalService"
+$ServicePort = 9100
+$MaxServiceStartAttempts = 30
 
 function Write-Status($message) {
     Write-Host "[*] $message" -ForegroundColor Cyan
@@ -117,8 +119,8 @@ function Install-Service {
             }
         }
         
-        # Run the node-windows installer
-        Write-Status "Registering Windows service..."
+        # Run the node-windows installer with enhanced recovery settings
+        Write-Status "Registering Windows service with auto-recovery..."
         & node -e @"
 const Service = require('node-windows').Service;
 const path = require('path');
@@ -132,7 +134,14 @@ const svc = new Service({
     env: [
         { name: 'XP_CONFIG_PATH', value: '$($InstallPath -replace '\\', '\\\\')'.replace(/\\\\/g, '/') + '/config.json' },
         { name: 'NODE_ENV', value: 'production' }
-    ]
+    ],
+    // Enhanced recovery settings for production reliability
+    maxRestarts: 10,
+    wait: 5,
+    grow: 0.5,
+    maxRetries: 3,
+    // Ensure auto-start on boot
+    startType: 'auto'
 });
 
 svc.on('install', () => {
@@ -150,6 +159,21 @@ svc.on('error', (err) => {
 
 svc.install();
 "@
+
+        # Wait for node-windows to complete
+        Start-Sleep -Seconds 3
+
+        # Configure Windows Service Recovery options (restart on failure)
+        Write-Status "Configuring service recovery options..."
+        $scConfig = @(
+            "failure", "$ServiceDisplayName",
+            "reset=", "86400",
+            "actions=", "restart/5000/restart/10000/restart/30000"
+        )
+        & sc.exe $scConfig 2>&1 | Out-Null
+
+        # Ensure service is set to auto-start
+        & sc.exe config "$ServiceDisplayName" start= auto 2>&1 | Out-Null
     }
     finally {
         Pop-Location
@@ -175,18 +199,89 @@ svc.install();
         }
     }
     
-    Write-Success "XP Thermal Service installed successfully!"
-    Write-Host ""
-    Write-Host "Service will start automatically on system boot."
-    Write-Host "Configuration file: $InstallPath\config.json"
-    Write-Host "Dashboard:          http://127.0.0.1:9100/dashboard"
-    Write-Host "Log files:          $InstallPath\logs\"
-    Write-Host ""
-    Write-Host "To manage the service:"
-    Write-Host "  Start:   .\install.ps1 -Start"
-    Write-Host "  Stop:    .\install.ps1 -Stop"
-    Write-Host "  Restart: .\install.ps1 -Restart"
-    Write-Host ""
+    # Verify service installation and wait for it to start
+    Write-Status "Verifying service installation..."
+    Start-Sleep -Seconds 3
+    
+    $verifyAttempts = 0
+    $serviceReady = $false
+    
+    while ($verifyAttempts -lt $MaxServiceStartAttempts -and -not $serviceReady) {
+        $svc = Get-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
+        if ($svc) {
+            if ($svc.Status -eq 'Running') {
+                $serviceReady = $true
+            } else {
+                Write-Host "  Service status: $($svc.Status) - waiting..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 2
+            }
+        } else {
+            Write-Host "  Waiting for service registration..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+        }
+        $verifyAttempts++
+    }
+    
+    if (-not $serviceReady) {
+        Write-Error "Service did not start within expected time. Please check logs."
+        Write-Host "Attempting manual start..."
+        Start-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+    }
+    
+    # Health check - probe the service endpoint
+    Write-Status "Performing health check..."
+    $healthCheckAttempts = 0
+    $healthOk = $false
+    $activePort = $ServicePort
+    
+    while ($healthCheckAttempts -lt 15 -and -not $healthOk) {
+        for ($p = $ServicePort; $p -lt ($ServicePort + 10); $p++) {
+            try {
+                $response = Invoke-WebRequest -Uri "http://127.0.0.1:$p/health" -TimeoutSec 2 -UseBasicParsing -ErrorAction SilentlyContinue
+                if ($response.StatusCode -eq 200) {
+                    $healthOk = $true
+                    $activePort = $p
+                    break
+                }
+            } catch {
+                # Port not responding, try next
+            }
+        }
+        if (-not $healthOk) {
+            Start-Sleep -Seconds 2
+            $healthCheckAttempts++
+        }
+    }
+    
+    if ($healthOk) {
+        Write-Success "XP Thermal Service installed and running successfully!"
+        Write-Host ""
+        Write-Host "Service Status:     RUNNING" -ForegroundColor Green
+        Write-Host "Service will start automatically on system boot."
+        Write-Host "Configuration file: $InstallPath\config.json"
+        Write-Host "Dashboard:          http://127.0.0.1:$activePort/dashboard"
+        Write-Host "API Endpoint:       http://127.0.0.1:$activePort/api"
+        Write-Host "Log files:          $InstallPath\logs\"
+        Write-Host ""
+        
+        # Store active port for reference
+        Set-Content -Path "$InstallPath\active_port.txt" -Value $activePort
+        
+        Write-Host "To manage the service:"
+        Write-Host "  Start:   .\install.ps1 -Start"
+        Write-Host "  Stop:    .\install.ps1 -Stop"
+        Write-Host "  Restart: .\install.ps1 -Restart"
+        Write-Host ""
+    } else {
+        Write-Host ""
+        Write-Host "Service installed but health check failed." -ForegroundColor Yellow
+        Write-Host "The service may still be starting. Please verify manually:"
+        Write-Host "  1. Check service status: Get-Service '$ServiceDisplayName'"
+        Write-Host "  2. Open dashboard: http://127.0.0.1:$ServicePort/dashboard"
+        Write-Host "  3. Check logs: $InstallPath\logs\"
+        Write-Host ""
+    }
 }
 
 function Uninstall-Service {
