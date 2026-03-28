@@ -52,7 +52,7 @@ for /f "tokens=*" %%i in ('node --version') do echo         Found Node.js %%i
 
 REM Step 2: Install dependencies
 echo   [2/5] Installing dependencies...
-call npm install --omit=dev >nul 2>&1
+call npm install >nul 2>&1
 if %errorLevel% neq 0 (
     echo   [!] npm install failed. Check your network connection.
     pause

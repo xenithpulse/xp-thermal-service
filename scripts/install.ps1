@@ -119,6 +119,22 @@ function Install-Service {
             }
         }
         
+        # CRITICAL: Check if Windows service actually exists
+        # If daemon folder exists but service doesn't, clean up daemon folder first
+        $existingService = Get-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
+        $daemonPath = "$InstallPath\daemon"
+        
+        if (-not $existingService -and (Test-Path $daemonPath)) {
+            Write-Status "Cleaning up stale daemon folder (service not registered)..."
+            # Kill any processes that might be using daemon files
+            Get-Process | Where-Object { $_.Path -like "$daemonPath*" } | ForEach-Object {
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds 1
+            Remove-Item $daemonPath -Recurse -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+        }
+        
         # Run the node-windows installer with enhanced recovery settings
         Write-Status "Registering Windows service with auto-recovery..."
         & node -e @"
@@ -139,7 +155,6 @@ const svc = new Service({
     maxRestarts: 10,
     wait: 5,
     grow: 0.5,
-    maxRetries: 3,
     // Ensure auto-start on boot
     startType: 'auto'
 });
@@ -150,7 +165,8 @@ svc.on('install', () => {
 });
 
 svc.on('alreadyinstalled', () => {
-    console.log('Service already installed');
+    console.log('Service already installed - starting it');
+    svc.start();
 });
 
 svc.on('error', (err) => {
@@ -205,12 +221,18 @@ svc.install();
     
     $verifyAttempts = 0
     $serviceReady = $false
+    $serviceExists = $false
     
     while ($verifyAttempts -lt $MaxServiceStartAttempts -and -not $serviceReady) {
         $svc = Get-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
         if ($svc) {
+            $serviceExists = $true
             if ($svc.Status -eq 'Running') {
                 $serviceReady = $true
+            } elseif ($svc.Status -eq 'Stopped') {
+                Write-Host "  Service stopped - attempting to start..." -ForegroundColor Yellow
+                Start-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
             } else {
                 Write-Host "  Service status: $($svc.Status) - waiting..." -ForegroundColor Yellow
                 Start-Sleep -Seconds 2
@@ -220,6 +242,12 @@ svc.install();
             Start-Sleep -Seconds 2
         }
         $verifyAttempts++
+        
+        # If service exists but won't start after 5 tries, break out
+        if ($serviceExists -and $verifyAttempts -ge 5 -and -not $serviceReady) {
+            Write-Host "  Service exists but not starting - will try manual start" -ForegroundColor Yellow
+            break
+        }
     }
     
     if (-not $serviceReady) {
@@ -287,12 +315,47 @@ svc.install();
 function Uninstall-Service {
     Write-Status "Uninstalling XP Thermal Service..."
     
-    # Stop the service first
+    # Stop the service first using sc.exe for more reliable control
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -eq 'Running') {
+    if ($svc) {
         Write-Status "Stopping service..."
-        Stop-Service -Name $ServiceName -Force
-        Start-Sleep -Seconds 2
+        # Use sc.exe stop for reliability
+        sc.exe stop $ServiceName 2>$null | Out-Null
+        
+        # Wait for service to actually stop (up to 30 seconds)
+        $timeout = 30
+        $waited = 0
+        while ($waited -lt $timeout) {
+            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if (-not $svc -or $svc.Status -eq 'Stopped') {
+                break
+            }
+            Start-Sleep -Seconds 1
+            $waited++
+            Write-Host "." -NoNewline
+        }
+        Write-Host ""
+        
+        # Kill any lingering node processes running the service
+        $daemonExe = "$InstallPath\daemon\xpthermalprintservice.exe"
+        if (Test-Path $daemonExe) {
+            # Find and kill processes using this exe
+            Get-Process | Where-Object { $_.Path -eq $daemonExe } | ForEach-Object {
+                Write-Status "Terminating service process (PID: $($_.Id))..."
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
+        
+        # Also kill any node.exe running from the install path
+        Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object { 
+            $_.Path -like "$InstallPath*" 
+        } | ForEach-Object {
+            Write-Status "Terminating node process (PID: $($_.Id))..."
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Give processes time to fully terminate and release file handles
+        Start-Sleep -Seconds 3
     }
     
     # Uninstall via node-windows
@@ -312,12 +375,53 @@ svc.on('uninstall', () => {
     console.log('Service uninstalled');
 });
 
+svc.on('error', (err) => {
+    // Ignore errors - we'll clean up manually if needed
+});
+
 svc.uninstall();
 "@
+        }
+        catch {
+            Write-Status "node-windows uninstall had issues, cleaning up manually..."
         }
         finally {
             Pop-Location
         }
+        
+        # Wait a moment for node-windows to finish
+        Start-Sleep -Seconds 2
+    }
+    
+    # CRITICAL: Force delete the Windows service using sc.exe (backup for node-windows)
+    $svcCheck = Get-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
+    if ($svcCheck) {
+        Write-Status "Force removing Windows service registration..."
+        sc.exe delete "$ServiceDisplayName" 2>$null | Out-Null
+        Start-Sleep -Seconds 2
+    }
+    
+    # Manually remove daemon folder if it still exists (fallback for EPERM errors)
+    $daemonPath = "$InstallPath\daemon"
+    if (Test-Path $daemonPath) {
+        Write-Status "Cleaning up daemon folder..."
+        # Try to remove each file individually with retries
+        Get-ChildItem $daemonPath -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $retries = 3
+            while ($retries -gt 0) {
+                try {
+                    Remove-Item $_.FullName -Force -ErrorAction Stop
+                    break
+                }
+                catch {
+                    $retries--
+                    if ($retries -gt 0) {
+                        Start-Sleep -Milliseconds 500
+                    }
+                }
+            }
+        }
+        Remove-Item $daemonPath -Recurse -Force -ErrorAction SilentlyContinue
     }
     
     # Remove firewall rule (Win7-compatible)
