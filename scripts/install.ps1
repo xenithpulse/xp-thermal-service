@@ -10,12 +10,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ServiceName = "XPThermalService"
+# NOTE: node-windows creates service names by converting DisplayName: "XP Thermal Print Service" -> "xpthermalprintservice.exe"
+$ServiceName = "xpthermalprintservice.exe"
 $ServiceDisplayName = "XP Thermal Print Service"
 $ServiceDescription = "Production-grade thermal printing service for restaurant POS systems"
 $InstallPath = "$env:ProgramData\XPThermalService"
 $ServicePort = 9100
 $MaxServiceStartAttempts = 30
+
+# Legacy service names to clean up
+$LegacyServiceNames = @("XPThermalService", "xpthermalservice.exe")
 
 function Write-Status($message) {
     Write-Host "[*] $message" -ForegroundColor Cyan
@@ -58,6 +62,18 @@ function Install-Service {
     
     # Check Node.js
     Install-NodeIfMissing
+    
+    # Clean up any legacy/duplicate services
+    foreach ($legacySvc in $LegacyServiceNames) {
+        $oldSvc = Get-Service -Name $legacySvc -ErrorAction SilentlyContinue
+        if ($oldSvc) {
+            Write-Status "Removing legacy service: $legacySvc"
+            sc.exe stop $legacySvc 2>$null | Out-Null
+            Start-Sleep -Seconds 2
+            sc.exe delete $legacySvc 2>$null | Out-Null
+            Start-Sleep -Seconds 1
+        }
+    }
     
     # Create install directory
     if (-not (Test-Path $InstallPath)) {
@@ -394,11 +410,21 @@ svc.uninstall();
     }
     
     # CRITICAL: Force delete the Windows service using sc.exe (backup for node-windows)
-    $svcCheck = Get-Service -Name "$ServiceDisplayName" -ErrorAction SilentlyContinue
+    $svcCheck = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svcCheck) {
         Write-Status "Force removing Windows service registration..."
-        sc.exe delete "$ServiceDisplayName" 2>$null | Out-Null
+        sc.exe delete $ServiceName 2>$null | Out-Null
         Start-Sleep -Seconds 2
+    }
+    
+    # Also clean up any legacy services
+    foreach ($legacySvc in $LegacyServiceNames) {
+        $oldSvc = Get-Service -Name $legacySvc -ErrorAction SilentlyContinue
+        if ($oldSvc) {
+            Write-Status "Removing legacy service: $legacySvc"
+            sc.exe stop $legacySvc 2>$null | Out-Null
+            sc.exe delete $legacySvc 2>$null | Out-Null
+        }
     }
     
     # Manually remove daemon folder if it still exists (fallback for EPERM errors)
