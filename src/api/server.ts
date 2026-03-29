@@ -113,6 +113,16 @@ export class ApiServer {
       crossOriginEmbedderPolicy: false
     }));
 
+    // Private Network Access (PNA) support for Chrome
+    // This allows public websites (like Vercel) to access localhost services
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      // Handle preflight requests with Private Network Access
+      if (req.headers['access-control-request-private-network']) {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
+      next();
+    });
+
     // CORS configuration
     const hasWildcard = this.config.security.allowedOrigins.includes('*');
     this.app.use(cors({
@@ -135,7 +145,10 @@ export class ApiServer {
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key', 'X-API-Key'],
       // Only send credentials when origins are explicitly listed (not wildcard)
-      credentials: !hasWildcard
+      credentials: !hasWildcard,
+      // Ensure preflight is handled properly
+      preflightContinue: false,
+      optionsSuccessStatus: 204
     }));
 
     // Body parsing with size limit
