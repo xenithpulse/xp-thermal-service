@@ -144,6 +144,41 @@ export class ConfigManager {
         rawConfig = JSON.parse(content);
       } catch (error) {
         console.error(`Error loading config from ${this.configPath}:`, error);
+        
+        // Backup corrupt config
+        try {
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const backupPath = this.configPath.replace('.json', `.corrupt.${timestamp}.json`);
+          fs.copyFileSync(this.configPath, backupPath);
+          console.warn(`Corrupt config backed up to: ${backupPath}`);
+        } catch {
+          // Ignore backup errors
+        }
+        
+        // Try to load from example config
+        const examplePath = this.configPath.replace('config.json', 'config.example.json');
+        if (fs.existsSync(examplePath)) {
+          try {
+            const exampleContent = fs.readFileSync(examplePath, 'utf8');
+            rawConfig = JSON.parse(exampleContent);
+            console.log('Loaded configuration from example file');
+          } catch {
+            // Use defaults
+          }
+        }
+      }
+    } else {
+      // Config doesn't exist - try to copy from example
+      const examplePath = this.configPath.replace('config.json', 'config.example.json');
+      if (fs.existsSync(examplePath)) {
+        try {
+          fs.copyFileSync(examplePath, this.configPath);
+          const content = fs.readFileSync(this.configPath, 'utf8');
+          rawConfig = JSON.parse(content);
+          console.log(`Created config.json from example template`);
+        } catch {
+          // Use defaults
+        }
       }
     }
 

@@ -52,9 +52,22 @@ export class JobStore {
 
       // Load existing database or create new one
       if (fs.existsSync(this.dbPath)) {
-        const buffer = fs.readFileSync(this.dbPath);
-        this.db = new SQL.Database(buffer);
-        this.logger.info(`Loaded existing database: ${this.dbPath}`);
+        try {
+          const buffer = fs.readFileSync(this.dbPath);
+          this.db = new SQL.Database(buffer);
+          
+          // Validate database integrity
+          const integrityCheck = this.db.exec("PRAGMA integrity_check");
+          if (integrityCheck.length > 0 && integrityCheck[0].values[0][0] !== 'ok') {
+            throw new Error(`Database integrity check failed: ${integrityCheck[0].values[0][0]}`);
+          }
+          
+          this.logger.info(`Loaded existing database: ${this.dbPath}`);
+        } catch (loadError) {
+          // Database corrupted - backup and recreate
+          this.logger.error(`Database corrupted, creating fresh database: ${loadError}`);
+          await this.handleCorruptDatabase(SQL);
+        }
       } else {
         this.db = new SQL.Database();
         this.logger.info(`Created new database: ${this.dbPath}`);
@@ -81,6 +94,33 @@ export class JobStore {
       this.logger.error('Failed to initialize job store:', error);
       throw error;
     }
+  }
+
+  /**
+   * Handle corrupted database by backing up and creating fresh one
+   */
+  private async handleCorruptDatabase(SQL: any): Promise<void> {
+    // Backup corrupted database
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = this.dbPath.replace('.db', `.corrupted.${timestamp}.db`);
+    
+    try {
+      fs.copyFileSync(this.dbPath, backupPath);
+      this.logger.warn(`Corrupted database backed up to: ${backupPath}`);
+    } catch (backupError) {
+      this.logger.warn(`Could not backup corrupted database: ${backupError}`);
+    }
+    
+    // Remove corrupted database
+    try {
+      fs.unlinkSync(this.dbPath);
+    } catch {
+      // Ignore
+    }
+    
+    // Create fresh database
+    this.db = new SQL.Database();
+    this.logger.info('Created fresh database after corruption recovery');
   }
 
   private async ensureInitialized(): Promise<void> {

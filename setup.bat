@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 REM ============================================
 REM   XP Thermal Service - One-Click Setup
 REM   Powered by XenithPulse.com
@@ -78,31 +79,65 @@ if not exist "config.json" (
 
 REM Step 5: Install as Windows service
 echo   [4/5] Installing Windows service...
+echo.
 PowerShell -ExecutionPolicy Bypass -File "scripts\install.ps1"
 
-if %errorLevel% neq 0 (
-    echo   [!] Service installation had issues.
-    echo       The service may still work - check below.
-    echo.
-)
+set INSTALL_RESULT=%errorLevel%
 
 REM Step 6: Done - open dashboard
+echo.
 echo   [5/5] Setup complete!
 echo.
-echo   =========================================
-echo    XP Thermal Service is now installed!
-echo   =========================================
-echo.
-echo   Dashboard:  http://127.0.0.1:9100/dashboard
-echo   API:        http://127.0.0.1:9100/health
-echo.
-echo   The service starts automatically when
-echo   your computer boots up.
-echo.
-echo   Opening dashboard in your browser...
-echo.
 
-timeout /t 3 >nul
-start http://127.0.0.1:9100/dashboard
+if %INSTALL_RESULT% neq 0 (
+    echo   =========================================
+    echo    Installation had issues
+    echo   =========================================
+    echo.
+    echo   The service installation encountered problems.
+    echo   Please check the logs above for details.
+    echo.
+    echo   You can try:
+    echo     1. Run as Administrator
+    echo     2. Run scripts\uninstall.bat first
+    echo     3. Check the installation log in %%TEMP%%
+    echo.
+) else (
+    echo   =========================================
+    echo    XP Thermal Service is now installed!
+    echo   =========================================
+    echo.
+    
+    REM Try to read actual port from install location
+    set "DASHBOARD_PORT=9100"
+    if exist "%ProgramData%\XPThermalService\active_port.txt" (
+        set /p DASHBOARD_PORT=<"%ProgramData%\XPThermalService\active_port.txt"
+    )
+    
+    echo   Dashboard:  http://127.0.0.1:!DASHBOARD_PORT!/dashboard
+    echo   API:        http://127.0.0.1:!DASHBOARD_PORT!/health
+    echo.
+    echo   The service will:
+    echo     - Start automatically on boot
+    echo     - Auto-restart if it crashes
+    echo     - Be monitored by a watchdog
+    echo.
+    echo   Opening dashboard in your browser...
+    echo.
+    
+    timeout /t 3 >nul
+    
+    REM Try each possible port
+    for /L %%p in (9100,1,9110) do (
+        curl -s -o nul -w "" http://127.0.0.1:%%p/health >nul 2>&1
+        if !errorLevel! equ 0 (
+            start http://127.0.0.1:%%p/dashboard
+            goto :done
+        )
+    )
+    REM Fallback
+    start http://127.0.0.1:9100/dashboard
+)
 
+:done
 pause
