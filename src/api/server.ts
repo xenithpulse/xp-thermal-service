@@ -113,6 +113,7 @@ export class ApiServer {
         directives: {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+          scriptSrcAttr: ["'unsafe-inline'"],
           styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://fonts.googleapis.com"],
           fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdn.jsdelivr.net"],
           connectSrc: ["'self'"],
@@ -132,20 +133,32 @@ export class ApiServer {
       next();
     });
 
-    // CORS configuration
-    const hasWildcard = this.config.security.allowedOrigins.includes('*');
+    // CORS configuration — checks are dynamic so config updates apply immediately
     this.app.use(cors({
       origin: (origin, callback) => {
-        // Allow requests with no origin (e.g., server-to-server)
+        // Allow requests with no origin (e.g., server-to-server, same-origin fetch)
         if (!origin) {
           callback(null, true);
           return;
         }
 
-        if (hasWildcard) {
+        // Always allow the service's own origin (dashboard served from same host)
+        const selfOrigin = `http://${this.config.host}:${this.config.port}`;
+        const selfOrigins = [
+          selfOrigin,
+          `http://127.0.0.1:${this.config.port}`,
+          `http://localhost:${this.config.port}`,
+        ];
+        if (selfOrigins.includes(origin)) {
+          callback(null, true);
+          return;
+        }
+
+        const origins = this.config.security.allowedOrigins;
+        if (origins.includes('*')) {
           // Wildcard: allow all origins but without reflecting the specific origin
           callback(null, '*');
-        } else if (this.config.security.allowedOrigins.includes(origin)) {
+        } else if (origins.includes(origin)) {
           callback(null, true);
         } else {
           callback(new Error('Not allowed by CORS'));
@@ -154,7 +167,7 @@ export class ApiServer {
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key', 'X-API-Key'],
       // Only send credentials when origins are explicitly listed (not wildcard)
-      credentials: !hasWildcard,
+      credentials: !this.config.security.allowedOrigins.includes('*'),
       // Ensure preflight is handled properly
       preflightContinue: false,
       optionsSuccessStatus: 204
@@ -793,7 +806,11 @@ export class ApiServer {
     try {
       const cm = this.config.configManager;
       cm.updateServerConfig(req.body);
-      res.json({ success: true, server: cm.getServerConfig() });
+      res.json({
+        success: true,
+        message: 'Server configuration saved. Restart the service for host/port changes to take effect.',
+        server: cm.getServerConfig()
+      });
     } catch (error) {
       this.handleError(error, res);
     }
@@ -802,8 +819,30 @@ export class ApiServer {
   private handleUpdateSecurityConfig(req: Request, res: Response): void {
     try {
       const cm = this.config.configManager;
+
+      // Validate before saving
       cm.updateSecurityConfig(req.body);
-      res.json({ success: true, security: cm.getSecurityConfig() });
+
+      // Apply new security settings to the running server
+      const newSecurity = cm.getSecurityConfig();
+      this.config.security = newSecurity;
+
+      // Recreate rate limiter with updated limits
+      try {
+        this.rateLimiter = new RateLimiterMemory({
+          points: newSecurity.rateLimitPerMinute,
+          duration: 60,
+          blockDuration: 60,
+        });
+      } catch (rlErr) {
+        this.logger.warn({ error: rlErr }, 'Failed to recreate rate limiter, keeping previous');
+      }
+
+      res.json({
+        success: true,
+        message: 'Security configuration updated and applied immediately.',
+        security: newSecurity
+      });
     } catch (error) {
       this.handleError(error, res);
     }
@@ -822,7 +861,11 @@ export class ApiServer {
     try {
       const cm = this.config.configManager;
       cm.addPrinter(req.body);
-      res.status(201).json({ success: true, printers: cm.getPrinters() });
+      res.status(201).json({
+        success: true,
+        message: 'Printer added successfully. Restart the service to activate the new printer.',
+        printers: cm.getPrinters()
+      });
     } catch (error) {
       this.handleError(error, res);
     }
@@ -833,7 +876,11 @@ export class ApiServer {
       const { printerId } = req.params;
       const cm = this.config.configManager;
       cm.updatePrinter(printerId, req.body);
-      res.json({ success: true, printer: cm.getPrinter(printerId) });
+      res.json({
+        success: true,
+        message: 'Printer configuration updated. Restart the service for changes to take effect.',
+        printer: cm.getPrinter(printerId)
+      });
     } catch (error) {
       this.handleError(error, res);
     }
@@ -844,7 +891,11 @@ export class ApiServer {
       const { printerId } = req.params;
       const cm = this.config.configManager;
       cm.removePrinter(printerId);
-      res.json({ success: true, printers: cm.getPrinters() });
+      res.json({
+        success: true,
+        message: 'Printer removed successfully.',
+        printers: cm.getPrinters()
+      });
     } catch (error) {
       this.handleError(error, res);
     }
@@ -892,11 +943,26 @@ export class ApiServer {
       return;
     }
 
-    this.logger.error({ error }, 'Unexpected error');
+    // Surface validation / config errors with their real message
+    if (error instanceof Error) {
+      const isValidation = error.message.startsWith('Invalid ');
+      if (isValidation) {
+        this.logger.warn({ message: error.message }, 'Validation error');
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: error.message
+        });
+        return;
+      }
+
+      this.logger.error({ error: error.message, stack: error.stack }, 'Unexpected error');
+    } else {
+      this.logger.error({ error }, 'Unexpected error');
+    }
     
     res.status(500).json({
       error: ErrorCodes.INTERNAL_ERROR,
-      message: 'An internal error occurred'
+      message: error instanceof Error ? error.message : 'An internal error occurred'
     });
   }
 
@@ -911,11 +977,11 @@ export class ApiServer {
 
     // Global error handler
     this.app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
-      this.logger.error({ error }, 'Unhandled error');
+      this.logger.error({ error: error?.message, stack: error?.stack }, 'Unhandled error');
       
       res.status(500).json({
         error: ErrorCodes.INTERNAL_ERROR,
-        message: 'An internal error occurred'
+        message: error instanceof Error ? error.message : 'An internal error occurred'
       });
     });
   }

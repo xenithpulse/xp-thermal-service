@@ -5,199 +5,536 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>XP Thermal Service - Dashboard</title>
 <style>
+  :root {
+    --bg: #0f1117;
+    --bg-card: #181a20;
+    --bg-card-alt: #1e2028;
+    --bg-hover: #23252e;
+    --border: #2a2d38;
+    --border-light: #33363f;
+    --text: #e1e3ea;
+    --text-dim: #8b8fa3;
+    --text-muted: #5c5f72;
+    --accent: #6c5ce7;
+    --accent-light: #a29bfe;
+    --accent-bg: rgba(108,92,231,0.12);
+    --green: #00d68f;
+    --green-bg: rgba(0,214,143,0.12);
+    --red: #ff4757;
+    --red-bg: rgba(255,71,87,0.12);
+    --yellow: #ffc048;
+    --yellow-bg: rgba(255,192,72,0.12);
+    --blue: #339af0;
+    --blue-bg: rgba(51,154,240,0.12);
+    --sidebar-w: 240px;
+    --header-h: 56px;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
-  
-  .header { background: #1a1a2e; color: #fff; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
-  .header h1 { font-size: 18px; font-weight: 600; }
-  .header .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .header .dot { width: 10px; height: 10px; border-radius: 50%; }
-  .dot.green { background: #4ade80; }
-  .dot.yellow { background: #facc15; }
-  .dot.red { background: #f87171; }
-  
-  .container { max-width: 960px; margin: 24px auto; padding: 0 16px; }
-  
-  .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; overflow: hidden; }
-  .card-header { padding: 14px 20px; border-bottom: 1px solid #e5e5e5; display: flex; align-items: center; justify-content: space-between; }
-  .card-header h2 { font-size: 15px; font-weight: 600; }
+  body { 
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg); color: var(--text); overflow: hidden; height: 100vh;
+  }
+
+  /* ── Layout Shell ── */
+  .app { display: flex; height: 100vh; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: var(--sidebar-w); background: var(--bg-card); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; flex-shrink: 0; z-index: 10;
+  }
+  .sidebar-brand {
+    height: var(--header-h); display: flex; align-items: center; padding: 0 20px;
+    border-bottom: 1px solid var(--border); gap: 10px;
+  }
+  .sidebar-brand .logo {
+    width: 32px; height: 32px; background: var(--accent); border-radius: 8px;
+    display: flex; align-items: center; justify-content: center; font-weight: 800;
+    font-size: 14px; color: #fff; flex-shrink: 0;
+  }
+  .sidebar-brand span { font-size: 14px; font-weight: 700; color: var(--text); white-space: nowrap; }
+
+  .sidebar-nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
+  .nav-section { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-muted); padding: 16px 10px 6px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--radius-sm);
+    font-size: 13px; font-weight: 500; color: var(--text-dim); cursor: pointer;
+    transition: all 0.15s; margin-bottom: 2px; user-select: none;
+  }
+  .nav-item:hover { background: var(--bg-hover); color: var(--text); }
+  .nav-item.active { background: var(--accent-bg); color: var(--accent-light); font-weight: 600; }
+  .nav-item svg { width: 18px; height: 18px; flex-shrink: 0; opacity: 0.7; }
+  .nav-item.active svg { opacity: 1; }
+
+  .sidebar-footer {
+    padding: 14px 20px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted); text-align: center;
+  }
+
+  /* ── Main Area ── */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    height: var(--header-h); background: var(--bg-card); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 12px; }
+  .topbar-left h2 { font-size: 16px; font-weight: 700; color: var(--text); }
+  .topbar-right { display: flex; align-items: center; gap: 16px; }
+  .status-pill {
+    display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+    border-radius: 20px; font-size: 12px; font-weight: 600;
+  }
+  .status-pill.healthy { background: var(--green-bg); color: var(--green); }
+  .status-pill.degraded { background: var(--yellow-bg); color: var(--yellow); }
+  .status-pill.offline { background: var(--red-bg); color: var(--red); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.green { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.yellow { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+  .status-dot.red { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .version-tag { font-size: 11px; color: var(--text-muted); background: var(--bg-hover); padding: 3px 8px; border-radius: 4px; }
+
+  /* ── Content ── */
+  .content { flex: 1; overflow-y: auto; padding: 24px; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* ── Stat Cards ── */
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px; display: flex; gap: 14px; align-items: flex-start; transition: border-color 0.2s;
+  }
+  .stat-card:hover { border-color: var(--border-light); }
+  .stat-icon {
+    width: 42px; height: 42px; border-radius: var(--radius-sm); display: flex;
+    align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .stat-icon svg { width: 20px; height: 20px; }
+  .stat-icon.purple { background: var(--accent-bg); color: var(--accent-light); }
+  .stat-icon.green { background: var(--green-bg); color: var(--green); }
+  .stat-icon.blue { background: var(--blue-bg); color: var(--blue); }
+  .stat-icon.yellow { background: var(--yellow-bg); color: var(--yellow); }
+  .stat-info { flex: 1; }
+  .stat-val { font-size: 26px; font-weight: 800; line-height: 1.1; }
+  .stat-lbl { font-size: 12px; color: var(--text-dim); margin-top: 3px; font-weight: 500; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 20px; overflow: hidden;
+  }
+  .card-header {
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .card-header h3 { font-size: 14px; font-weight: 700; }
   .card-body { padding: 20px; }
-  
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .stat { background: #fafafa; border-radius: 6px; padding: 14px; text-align: center; border: 1px solid #eee; }
-  .stat .val { font-size: 24px; font-weight: 700; color: #1a1a2e; }
-  .stat .lbl { font-size: 11px; color: #888; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-  
+  .card-body.flush { padding: 0; }
+
+  /* ── Tables ── */
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; padding: 10px 12px; border-bottom: 2px solid #e5e5e5; font-weight: 600; color: #555; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-  td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; }
-  tr:hover td { background: #fafafa; }
-  
-  .badge { display: inline-block; padding: 3px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .badge.online { background: #dcfce7; color: #166534; }
-  .badge.offline { background: #fee2e2; color: #991b1b; }
-  .badge.error { background: #fef3c7; color: #92400e; }
-  
-  .btn { padding: 7px 14px; border: none; border-radius: 5px; font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
-  .btn:hover { opacity: 0.85; }
-  .btn-primary { background: #1a1a2e; color: #fff; }
-  .btn-danger { background: #ef4444; color: #fff; }
-  .btn-sm { padding: 4px 10px; font-size: 11px; }
-  .btn-outline { background: transparent; border: 1px solid #ddd; color: #555; }
-  
-  .form-group { margin-bottom: 14px; }
-  .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
-  .form-group input, .form-group select { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 13px; }
-  .form-group input:focus, .form-group select:focus { outline: none; border-color: #1a1a2e; }
-  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  
-  .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); z-index: 100; align-items: center; justify-content: center; }
+  th {
+    text-align: left; padding: 11px 16px; font-weight: 600; color: var(--text-dim);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+    background: var(--bg-card-alt); border-bottom: 1px solid var(--border);
+  }
+  td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg-hover); }
+
+  /* ── Badges ── */
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
+    border-radius: 20px; font-size: 11px; font-weight: 600;
+  }
+  .badge.online { background: var(--green-bg); color: var(--green); }
+  .badge.offline { background: var(--red-bg); color: var(--red); }
+  .badge.error { background: var(--yellow-bg); color: var(--yellow); }
+  .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; }
+  .badge.online::before { background: var(--green); }
+  .badge.offline::before { background: var(--red); }
+  .badge.error::before { background: var(--yellow); }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 8px 16px; border: none; border-radius: var(--radius-sm);
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn:active { transform: scale(0.98); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-success { background: var(--green); color: #0f1117; }
+  .btn-sm { padding: 5px 10px; font-size: 11px; }
+  .btn-outline {
+    background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .btn-outline:hover { border-color: var(--text-dim); color: var(--text); background: var(--bg-hover); filter: none; }
+  .btn-ghost { background: transparent; color: var(--text-dim); padding: 5px 8px; }
+  .btn-ghost:hover { color: var(--text); background: var(--bg-hover); filter: none; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  /* ── Forms ── */
+  .form-group { margin-bottom: 16px; }
+  .form-group label {
+    display: block; font-size: 12px; font-weight: 600; color: var(--text-dim);
+    margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .form-group input, .form-group select {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 13px; background: var(--bg); color: var(--text); transition: border-color 0.2s;
+  }
+  .form-group input:focus, .form-group select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(108,92,231,0.15);
+  }
+  .form-group input::placeholder { color: var(--text-muted); }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .form-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+  .section-divider {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
+    color: var(--text-muted); margin: 20px 0 12px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .checkbox-row label { margin-bottom: 0; font-size: 13px; color: var(--text-dim); cursor: pointer; }
+
+  /* ── Two-Column Layout ── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* ── Settings Tabs ── */
+  .settings-tabs {
+    display: flex; gap: 2px; background: var(--bg); border-radius: var(--radius-sm);
+    padding: 3px; margin-bottom: 20px; border: 1px solid var(--border);
+  }
+  .settings-tab {
+    flex: 1; padding: 8px 12px; text-align: center; font-size: 12px; font-weight: 600;
+    color: var(--text-dim); cursor: pointer; border-radius: 4px; transition: all 0.15s;
+    user-select: none;
+  }
+  .settings-tab:hover { color: var(--text); }
+  .settings-tab.active { background: var(--accent); color: #fff; }
+  .settings-panel { display: none; }
+  .settings-panel.active { display: block; }
+
+  /* ── Empty State ── */
+  .empty-state {
+    text-align: center; padding: 40px 20px; color: var(--text-muted);
+  }
+  .empty-state svg { width: 40px; height: 40px; margin-bottom: 12px; opacity: 0.3; }
+  .empty-state p { font-size: 13px; }
+
+  /* ── Modal ── */
+  .modal-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 100;
+    align-items: center; justify-content: center;
+  }
   .modal-overlay.active { display: flex; }
-  .modal { background: #fff; border-radius: 10px; width: 500px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
-  .modal-header { padding: 16px 20px; border-bottom: 1px solid #e5e5e5; display: flex; justify-content: space-between; align-items: center; }
-  .modal-header h3 { font-size: 15px; }
-  .modal-body { padding: 20px; }
-  .modal-footer { padding: 14px 20px; border-top: 1px solid #e5e5e5; display: flex; justify-content: flex-end; gap: 8px; }
-  .close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: #888; }
-  
-  .actions { display: flex; gap: 6px; }
-  .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 6px; color: #fff; font-size: 13px; font-weight: 500; z-index: 200; animation: fadeIn 0.3s; }
+  .modal {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    width: 520px; max-width: 95vw; max-height: 90vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal-header {
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .modal-header h3 { font-size: 16px; font-weight: 700; }
+  .modal-body { padding: 24px; }
+  .modal-footer {
+    padding: 16px 24px; border-top: 1px solid var(--border);
+    display: flex; justify-content: flex-end; gap: 8px;
+  }
+  .close-btn { background: none; border: none; font-size: 22px; cursor: pointer; color: var(--text-muted); line-height: 1; }
+  .close-btn:hover { color: var(--text); }
+
+  /* ── Toast ── */
+  .toast {
+    position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: var(--radius-sm);
+    color: #fff; font-size: 13px; font-weight: 500; z-index: 200;
+    animation: toastIn 0.3s ease; display: flex; align-items: center; gap: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  }
   .toast.success { background: #16a34a; }
   .toast.error { background: #dc2626; }
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-  
-  .footer { text-align: center; padding: 24px; color: #aaa; font-size: 11px; }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .checkbox-row input[type="checkbox"] { width: auto; }
-  .checkbox-row label { margin-bottom: 0; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
-  .section-label { font-size: 12px; font-weight: 600; color: #1a1a2e; margin: 16px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #eee; }
+  /* ── Queue State Bar ── */
+  .queue-bar {
+    display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--bg);
+    margin-top: 12px;
+  }
+  .queue-bar div { transition: width 0.4s ease; }
+  .queue-bar .seg-completed { background: var(--green); }
+  .queue-bar .seg-processing { background: var(--blue); }
+  .queue-bar .seg-pending { background: var(--yellow); }
+  .queue-bar .seg-failed { background: var(--red); }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .sidebar { width: 56px; }
+    .sidebar-brand span, .nav-item span, .nav-section, .sidebar-footer { display: none; }
+    .sidebar-brand { justify-content: center; padding: 0; }
+    .nav-item { justify-content: center; padding: 10px; }
+    .content { padding: 16px; }
+    .stat-grid { grid-template-columns: 1fr 1fr; }
+  }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>XP Thermal Service</h1>
-  <div class="status">
-    <span class="dot" id="statusDot"></span>
-    <span id="statusText">Checking...</span>
-    <span style="margin-left:12px;opacity:0.6" id="versionText"></span>
-  </div>
-</div>
-
-<div class="container">
-
-  <!-- Stats Row -->
-  <div class="stats" id="stats"></div>
-
-  <!-- Printers Card -->
-  <div class="card">
-    <div class="card-header">
-      <h2>Configured Printers</h2>
-      <button class="btn btn-primary btn-sm" onclick="openAddPrinter()">+ Add Printer</button>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="logo">XP</div>
+      <span>Thermal Service</span>
     </div>
-    <div class="card-body" style="padding:0">
-      <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Target</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody id="printerTable"></tbody>
-      </table>
-    </div>
-  </div>
+    <nav class="sidebar-nav" id="sidebarNav">
+      <div class="nav-section">Main</div>
+      <div class="nav-item active" data-page="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        <span>Overview</span>
+      </div>
+      <div class="nav-item" data-page="printers">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+        <span>Printers</span>
+      </div>
+      <div class="nav-item" data-page="jobs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span>Jobs</span>
+      </div>
 
-  <!-- Server Config Card -->
-  <div class="card">
-    <div class="card-header">
-      <h2>Server Settings</h2>
-      <button class="btn btn-primary btn-sm" onclick="saveServerConfig()">Save</button>
+      <div class="nav-section">System</div>
+      <div class="nav-item" data-page="queue">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        <span>Queue</span>
+      </div>
+      <div class="nav-item" data-page="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        <span>Settings</span>
+      </div>
+      <div class="nav-item" data-page="system">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span>System</span>
+      </div>
+    </nav>
+    <div class="sidebar-footer">
+      v<span id="footerVersion">1.0.0</span>
     </div>
-    <div class="card-body">
-      <div class="form-row">
-        <div class="form-group">
-          <label>Host</label>
-          <input type="text" id="cfgHost" placeholder="127.0.0.1">
+  </aside>
+
+  <!-- Main Panel -->
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <h2 id="pageTitle">Overview</h2>
+      </div>
+      <div class="topbar-right">
+        <div class="status-pill healthy" id="statusPill">
+          <span class="status-dot green" id="statusDot"></span>
+          <span id="statusText">Checking...</span>
         </div>
-        <div class="form-group">
-          <label>Port</label>
-          <input type="number" id="cfgPort" placeholder="9100">
+        <span class="version-tag" id="versionText"></span>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <!-- ═══ OVERVIEW PAGE ═══ -->
+      <div class="page active" id="page-overview">
+        <div class="stat-grid" id="stats"></div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <h3>Printers</h3>
+              <button class="btn btn-outline btn-sm" data-navigate="printers">View All</button>
+            </div>
+            <div class="card-body flush">
+              <table>
+                <thead><tr><th>Name</th><th>Type</th><th>Status</th></tr></thead>
+                <tbody id="overviewPrinterTable"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Queue</h3>
+              <button class="btn btn-outline btn-sm" data-navigate="queue">Details</button>
+            </div>
+            <div class="card-body">
+              <div class="stat-grid" style="margin-bottom:0" id="overviewQueueStats"></div>
+              <div class="queue-bar" id="overviewQueueBar"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>Recent Jobs</h3>
+            <button class="btn btn-outline btn-sm" data-navigate="jobs">View All</button>
+          </div>
+          <div class="card-body flush">
+            <table>
+              <thead><tr><th>ID</th><th>Printer</th><th>Type</th><th>Status</th><th>Created</th></tr></thead>
+              <tbody id="overviewJobsTable"></tbody>
+            </table>
+          </div>
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- Security Config Card -->
-  <div class="card">
-    <div class="card-header">
-      <h2>Security Settings</h2>
-      <button class="btn btn-primary btn-sm" onclick="saveSecurityConfig()">Save</button>
-    </div>
-    <div class="card-body">
-      <div class="form-group">
-        <label>Allowed Origins (comma-separated)</label>
-        <input type="text" id="cfgOrigins" placeholder="http://localhost:3000, *">
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Rate Limit (per minute)</label>
-          <input type="number" id="cfgRateLimit" placeholder="120">
-        </div>
-        <div class="form-group">
-          <label>API Key (leave blank to disable)</label>
-          <input type="text" id="cfgApiKey" placeholder="Optional">
+      <!-- ═══ PRINTERS PAGE ═══ -->
+      <div class="page" id="page-printers">
+        <div class="card">
+          <div class="card-header">
+            <h3>Configured Printers</h3>
+            <button class="btn btn-primary btn-sm" data-action="openAddPrinter">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Printer
+            </button>
+          </div>
+          <div class="card-body flush">
+            <table>
+              <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Target</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody id="printerTable"></tbody>
+            </table>
+          </div>
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- Queue Stats Card -->
-  <div class="card">
-    <div class="card-header">
-      <h2>Queue</h2>
-      <div class="actions">
-        <button class="btn btn-outline btn-sm" onclick="pauseQueue()">Pause</button>
-        <button class="btn btn-outline btn-sm" onclick="resumeQueue()">Resume</button>
-        <button class="btn btn-danger btn-sm" onclick="clearFailedJobs()">Clear Failed</button>
+      <!-- ═══ JOBS PAGE ═══ -->
+      <div class="page" id="page-jobs">
+        <div class="card">
+          <div class="card-header">
+            <h3>Print Jobs</h3>
+            <button class="btn btn-outline btn-sm" data-action="loadJobs">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+              Refresh
+            </button>
+          </div>
+          <div class="card-body flush">
+            <table>
+              <thead><tr><th>ID</th><th>Printer</th><th>Type</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+              <tbody id="jobsTable"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="card-body">
-      <div class="stats" id="queueStats"></div>
-    </div>
-  </div>
 
-  <!-- System Info Card -->
-  <div class="card">
-    <div class="card-header">
-      <h2>System Info</h2>
-      <button class="btn btn-outline btn-sm" onclick="loadSystemInfo()">Refresh</button>
-    </div>
-    <div class="card-body">
-      <div class="stats" id="systemStats"></div>
-    </div>
-  </div>
+      <!-- ═══ QUEUE PAGE ═══ -->
+      <div class="page" id="page-queue">
+        <div class="card">
+          <div class="card-header">
+            <h3>Queue Management</h3>
+            <div class="actions">
+              <button class="btn btn-outline btn-sm" data-action="pauseQueue">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                Pause
+              </button>
+              <button class="btn btn-success btn-sm" data-action="resumeQueue">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Resume
+              </button>
+              <button class="btn btn-danger btn-sm" data-action="clearFailedJobs">Clear Failed</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="stat-grid" id="queueStats"></div>
+            <div class="queue-bar" id="queueBar"></div>
+          </div>
+        </div>
+      </div>
 
-  <!-- Recent Jobs Card -->
-  <div class="card">
-    <div class="card-header">
-      <h2>Recent Jobs</h2>
-      <button class="btn btn-outline btn-sm" onclick="loadJobs()">Refresh</button>
-    </div>
-    <div class="card-body" style="padding:0">
-      <table>
-        <thead><tr><th>ID</th><th>Printer</th><th>Type</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
-        <tbody id="jobsTable"></tbody>
-      </table>
-    </div>
-  </div>
+      <!-- ═══ SETTINGS PAGE ═══ -->
+      <div class="page" id="page-settings">
+        <div class="settings-tabs" id="settingsTabs">
+          <div class="settings-tab active" data-tab="server">Server</div>
+          <div class="settings-tab" data-tab="security">Security</div>
+        </div>
 
-</div>
+        <div class="settings-panel active" id="settingsPanel-server">
+          <div class="card">
+            <div class="card-header">
+              <h3>Server Configuration</h3>
+              <button class="btn btn-primary btn-sm" data-action="saveServerConfig">Save Changes</button>
+            </div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Host</label>
+                  <input type="text" id="cfgHost" placeholder="127.0.0.1">
+                  <div class="form-hint">Bind address for the HTTP server</div>
+                </div>
+                <div class="form-group">
+                  <label>Port</label>
+                  <input type="number" id="cfgPort" placeholder="9100">
+                  <div class="form-hint">Restart required for port changes</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
 
-<div class="footer">Powered by XenithPulse.com &middot; XP Thermal Service v<span id="footerVersion">1.0.0</span></div>
+        <div class="settings-panel" id="settingsPanel-security">
+          <div class="card">
+            <div class="card-header">
+              <h3>Security Configuration</h3>
+              <button class="btn btn-primary btn-sm" data-action="saveSecurityConfig">Save Changes</button>
+            </div>
+            <div class="card-body">
+              <div class="form-group">
+                <label>Allowed Origins</label>
+                <input type="text" id="cfgOrigins" placeholder="http://localhost:3000, *">
+                <div class="form-hint">Comma-separated list. Use * to allow all origins.</div>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Rate Limit (per minute)</label>
+                  <input type="number" id="cfgRateLimit" placeholder="120">
+                </div>
+                <div class="form-group">
+                  <label>API Key</label>
+                  <input type="text" id="cfgApiKey" placeholder="Leave blank to disable">
+                  <div class="form-hint">Applied immediately without restart</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-<!-- Add / Edit Printer Modal -->
+      <!-- ═══ SYSTEM PAGE ═══ -->
+      <div class="page" id="page-system">
+        <div class="stat-grid" id="systemStats"></div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ═══ Add / Edit Printer Modal ═══ -->
 <div class="modal-overlay" id="printerModal">
   <div class="modal">
     <div class="modal-header">
       <h3 id="modalTitle">Add Printer</h3>
-      <button class="close-btn" onclick="closeModal()">&times;</button>
+      <button class="close-btn" data-action="closeModal">&times;</button>
     </div>
     <div class="modal-body">
       <input type="hidden" id="editPrinterId">
@@ -215,7 +552,7 @@
 
       <div class="form-group">
         <label>Type</label>
-        <select id="pType" onchange="toggleTypeFields()">
+        <select id="pType">
           <option value="usb">USB / Windows Printer</option>
           <option value="network">Network (IP)</option>
         </select>
@@ -243,7 +580,7 @@
         </div>
       </div>
 
-      <div class="section-label">Capabilities</div>
+      <div class="section-divider">Capabilities</div>
       <div class="form-row">
         <div class="form-group">
           <label>Paper Width (characters)</label>
@@ -268,18 +605,16 @@
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="savePrinter()">Save Printer</button>
+      <button class="btn btn-outline" data-action="closeModal">Cancel</button>
+      <button class="btn btn-primary" data-action="savePrinter">Save Printer</button>
     </div>
   </div>
 </div>
 
 <script>
 let API = window.location.origin;
-
-// When opened as a local file, auto-discover the running service port
 if (window.location.protocol === 'file:') {
-  API = 'http://127.0.0.1:9100'; // will be resolved by discoverPort()
+  API = 'http://127.0.0.1:9100';
 }
 
 async function discoverPort() {
@@ -295,13 +630,33 @@ async function discoverPort() {
 }
 
 // ── Helpers ──
-const __API_KEY = window.__XP_API_KEY__ || '';
+let __API_KEY = window.__XP_API_KEY__ || '';
+
+async function fetchApiKey() {
+  if (__API_KEY) return;
+  try {
+    const res = await fetch(API + '/api/auth/local-token');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.apiKey) __API_KEY = data.apiKey;
+    }
+  } catch {}
+}
+
 async function api(method, path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (__API_KEY) headers['X-API-Key'] = __API_KEY;
   const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(API + path, opts);
+  if (res.status === 401) {
+    await fetchApiKey();
+    if (__API_KEY) {
+      headers['X-API-Key'] = __API_KEY;
+      const retry = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      return retry.json();
+    }
+  }
   return res.json();
 }
 
@@ -310,10 +665,9 @@ function toast(msg, type = 'success') {
   el.className = 'toast ' + type;
   el.textContent = msg;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
+  setTimeout(() => el.remove(), 3500);
 }
 
-// HTML-escape to prevent XSS
 function esc(str) {
   const d = document.createElement('div');
   d.textContent = String(str == null ? '' : str);
@@ -327,39 +681,172 @@ function formatUptime(ms) {
   return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
+// ── State & Router ──
+const state = {
+  currentPage: 'overview',
+  currentSettingsTab: 'server',
+  pages: ['overview','printers','jobs','queue','settings','system'],
+  titles: { overview:'Overview', printers:'Printers', jobs:'Print Jobs', queue:'Queue', settings:'Settings', system:'System' }
+};
+
+function showPage(name) {
+  if (!state.pages.includes(name)) name = 'overview';
+  state.currentPage = name;
+
+  // Update pages
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const page = document.getElementById('page-' + name);
+  if (page) page.classList.add('active');
+
+  // Update nav items via data-page attribute
+  document.querySelectorAll('#sidebarNav .nav-item').forEach(n => {
+    n.classList.toggle('active', n.dataset.page === name);
+  });
+
+  // Update title
+  document.getElementById('pageTitle').textContent = state.titles[name] || name;
+
+  // Sync hash without triggering hashchange
+  const hash = '#' + name;
+  if (window.location.hash !== hash) {
+    history.replaceState(null, '', hash);
+  }
+}
+
+function showSettingsTab(tab) {
+  state.currentSettingsTab = tab;
+  document.querySelectorAll('#settingsTabs .settings-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+  document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
+  const panel = document.getElementById('settingsPanel-' + tab);
+  if (panel) panel.classList.add('active');
+}
+
+// Hash-based routing
+function handleRoute() {
+  const hash = window.location.hash.replace('#', '') || 'overview';
+  showPage(hash);
+}
+window.addEventListener('hashchange', handleRoute);
+
+// ── Event Delegation ──
+document.addEventListener('DOMContentLoaded', function() {
+  // Sidebar nav clicks
+  document.getElementById('sidebarNav').addEventListener('click', function(e) {
+    const navItem = e.target.closest('.nav-item[data-page]');
+    if (navItem) {
+      window.location.hash = '#' + navItem.dataset.page;
+    }
+  });
+
+  // Settings tabs
+  document.getElementById('settingsTabs').addEventListener('click', function(e) {
+    const tab = e.target.closest('.settings-tab[data-tab]');
+    if (tab) showSettingsTab(tab.dataset.tab);
+  });
+
+  // Printer type toggle
+  document.getElementById('pType').addEventListener('change', toggleTypeFields);
+
+  // Delegated actions on the whole document
+  document.addEventListener('click', function(e) {
+    // data-navigate: page navigation buttons
+    const navBtn = e.target.closest('[data-navigate]');
+    if (navBtn) {
+      window.location.hash = '#' + navBtn.dataset.navigate;
+      return;
+    }
+
+    // data-action: mapped to functions
+    const actionBtn = e.target.closest('[data-action]');
+    if (actionBtn) {
+      const actions = {
+        openAddPrinter, closeModal, savePrinter, loadJobs,
+        pauseQueue, resumeQueue, clearFailedJobs,
+        saveServerConfig, saveSecurityConfig
+      };
+      const fn = actions[actionBtn.dataset.action];
+      if (fn) fn();
+    }
+  });
+});
+
 // ── Health & Stats ──
 async function loadHealth() {
   try {
     const d = await api('GET', '/health');
     const dot = document.getElementById('statusDot');
     const txt = document.getElementById('statusText');
-    dot.className = 'dot ' + (d.status === 'healthy' ? 'green' : d.status === 'degraded' ? 'yellow' : 'red');
+    const pill = document.getElementById('statusPill');
+    const statusClass = d.status === 'healthy' ? 'healthy' : d.status === 'degraded' ? 'degraded' : 'offline';
+    const dotClass = d.status === 'healthy' ? 'green' : d.status === 'degraded' ? 'yellow' : 'red';
+    pill.className = 'status-pill ' + statusClass;
+    dot.className = 'status-dot ' + dotClass;
     txt.textContent = d.status.charAt(0).toUpperCase() + d.status.slice(1);
     document.getElementById('versionText').textContent = 'v' + d.version;
     document.getElementById('footerVersion').textContent = d.version;
     
     document.getElementById('stats').innerHTML = `
-      <div class="stat"><div class="val">${d.printers.total}</div><div class="lbl">Printers</div></div>
-      <div class="stat"><div class="val">${d.printers.online}</div><div class="lbl">Online</div></div>
-      <div class="stat"><div class="val">${d.queue.pending}</div><div class="lbl">Pending Jobs</div></div>
-      <div class="stat"><div class="val">${formatUptime(d.uptime)}</div><div class="lbl">Uptime</div></div>
+      <div class="stat-card">
+        <div class="stat-icon purple">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+        </div>
+        <div class="stat-info"><div class="stat-val">${d.printers.total}</div><div class="stat-lbl">Total Printers</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon green">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <div class="stat-info"><div class="stat-val">${d.printers.online}</div><div class="stat-lbl">Online</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon yellow">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <div class="stat-info"><div class="stat-val">${d.queue.pending}</div><div class="stat-lbl">Pending Jobs</div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon blue">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <div class="stat-info"><div class="stat-val">${formatUptime(d.uptime)}</div><div class="stat-lbl">Uptime</div></div>
+      </div>
     `;
   } catch {
-    document.getElementById('statusDot').className = 'dot red';
-    document.getElementById('statusText').textContent = 'Unreachable';
+    const dot = document.getElementById('statusDot');
+    const txt = document.getElementById('statusText');
+    const pill = document.getElementById('statusPill');
+    pill.className = 'status-pill offline';
+    dot.className = 'status-dot red';
+    txt.textContent = 'Unreachable';
+  }
+}
+
+function renderQueueStats(d, statsId, barId) {
+  const total = (d.queue.completed||0) + (d.queue.processing||0) + (d.queue.pending||0) + (d.queue.failed||0);
+  const pct = n => total ? ((n/total)*100).toFixed(1) : 0;
+  document.getElementById(statsId).innerHTML = `
+    <div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="12 6 12 12 16 14"/><circle cx="12" cy="12" r="10"/></svg></div><div class="stat-info"><div class="stat-val">${d.queue.pending}</div><div class="stat-lbl">Pending</div></div></div>
+    <div class="stat-card"><div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg></div><div class="stat-info"><div class="stat-val">${d.queue.processing}</div><div class="stat-lbl">Processing</div></div></div>
+    <div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div><div class="stat-info"><div class="stat-val">${d.queue.completed}</div><div class="stat-lbl">Completed</div></div></div>
+    <div class="stat-card"><div class="stat-icon" style="background:var(--red-bg);color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div><div class="stat-info"><div class="stat-val">${d.queue.failed}</div><div class="stat-lbl">Failed</div></div></div>
+  `;
+  if (barId) {
+    document.getElementById(barId).innerHTML = `
+      <div class="seg-completed" style="width:${pct(d.queue.completed)}%"></div>
+      <div class="seg-processing" style="width:${pct(d.queue.processing)}%"></div>
+      <div class="seg-pending" style="width:${pct(d.queue.pending)}%"></div>
+      <div class="seg-failed" style="width:${pct(d.queue.failed)}%"></div>
+    `;
   }
 }
 
 async function loadQueueStats() {
   try {
     const d = await api('GET', '/api/queue/stats');
-    document.getElementById('queueStats').innerHTML = `
-      <div class="stat"><div class="val">${d.queue.pending}</div><div class="lbl">Pending</div></div>
-      <div class="stat"><div class="val">${d.queue.processing}</div><div class="lbl">Processing</div></div>
-      <div class="stat"><div class="val">${d.queue.completed}</div><div class="lbl">Completed</div></div>
-      <div class="stat"><div class="val">${d.queue.failed}</div><div class="lbl">Failed</div></div>
-      <div class="stat"><div class="val">${d.isPaused ? 'Paused' : 'Active'}</div><div class="lbl">State</div></div>
-    `;
+    renderQueueStats(d, 'queueStats', 'queueBar');
+    renderQueueStats(d, 'overviewQueueStats', 'overviewQueueBar');
   } catch {}
 }
 
@@ -381,41 +868,43 @@ async function loadSystemInfo() {
     const d = await api('GET', '/api/system/info');
     const conn = await api('GET', '/api/system/connections');
     document.getElementById('systemStats').innerHTML = `
-      <div class="stat"><div class="val">${d.memory.heapUsed}MB</div><div class="lbl">Heap Used</div></div>
-      <div class="stat"><div class="val">${d.memory.rss}MB</div><div class="lbl">RSS Memory</div></div>
-      <div class="stat"><div class="val">${conn.activeConnections}</div><div class="lbl">Connections</div></div>
-      <div class="stat"><div class="val">${d.nodeVersion}</div><div class="lbl">Node.js</div></div>
-      <div class="stat"><div class="val">${d.platform}</div><div class="lbl">Platform</div></div>
+      <div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div><div class="stat-info"><div class="stat-val">${d.memory.heapUsed}MB</div><div class="stat-lbl">Heap Used</div></div></div>
+      <div class="stat-card"><div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div><div class="stat-info"><div class="stat-val">${d.memory.rss}MB</div><div class="stat-lbl">RSS Memory</div></div></div>
+      <div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></div><div class="stat-info"><div class="stat-val">${conn.activeConnections}</div><div class="stat-lbl">Connections</div></div></div>
+      <div class="stat-card"><div class="stat-icon yellow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div><div class="stat-info"><div class="stat-val">${d.nodeVersion}</div><div class="stat-lbl">Node.js</div></div></div>
+      <div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div><div class="stat-info"><div class="stat-val">${d.platform}</div><div class="stat-lbl">Platform</div></div></div>
     `;
   } catch {
-    document.getElementById('systemStats').innerHTML = '<div style="color:#aaa;text-align:center;padding:12px">Unable to load system info</div>';
+    document.getElementById('systemStats').innerHTML = '<div class="empty-state"><p>Unable to load system info</p></div>';
   }
 }
 
 // ── Jobs ──
+function renderJobRows(jobs, showActions) {
+  if (!jobs || jobs.length === 0) {
+    const cols = showActions ? 6 : 5;
+    return `<tr><td colspan="${cols}"><div class="empty-state"><p>No recent jobs</p></div></td></tr>`;
+  }
+  return jobs.map(j => {
+    const statusCls = j.status === 'completed' ? 'online' : j.status === 'failed' || j.status === 'dead_letter' ? 'offline' : 'error';
+    const created = new Date(j.createdAt).toLocaleString();
+    const canRetry = j.status === 'failed' || j.status === 'dead_letter';
+    return `<tr>
+      <td style="font-size:11px;font-family:'SF Mono',Monaco,monospace;color:var(--text-dim)">${esc(j.id.substring(0,8))}</td>
+      <td>${esc(j.printerId)}</td>
+      <td>${esc(j.templateType)}</td>
+      <td><span class="badge ${statusCls}">${esc(j.status)}</span></td>
+      <td style="font-size:11px;color:var(--text-dim)">${created}</td>
+      ${showActions ? `<td class="actions">${canRetry ? `<button class="btn btn-outline btn-sm" onclick="retryJob('${esc(j.id)}')">Retry</button>` : ''}</td>` : ''}
+    </tr>`;
+  }).join('');
+}
+
 async function loadJobs() {
   try {
     const d = await api('GET', '/api/jobs?limit=20');
-    const tbody = document.getElementById('jobsTable');
-    if (!d.jobs || d.jobs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">No recent jobs</td></tr>';
-      return;
-    }
-    tbody.innerHTML = d.jobs.map(j => {
-      const statusCls = j.status === 'completed' ? 'online' : j.status === 'failed' || j.status === 'dead_letter' ? 'offline' : 'error';
-      const created = new Date(j.createdAt).toLocaleString();
-      const canRetry = j.status === 'failed' || j.status === 'dead_letter';
-      return `<tr>
-        <td style="font-size:11px;font-family:monospace">${esc(j.id.substring(0,8))}...</td>
-        <td>${esc(j.printerId)}</td>
-        <td>${esc(j.templateType)}</td>
-        <td><span class="badge ${statusCls}">${esc(j.status)}</span></td>
-        <td style="font-size:11px">${created}</td>
-        <td class="actions">
-          ${canRetry ? `<button class="btn btn-outline btn-sm" onclick="retryJob('${esc(j.id)}')">Retry</button>` : ''}
-        </td>
-      </tr>`;
-    }).join('');
+    document.getElementById('jobsTable').innerHTML = renderJobRows(d.jobs, true);
+    document.getElementById('overviewJobsTable').innerHTML = renderJobRows((d.jobs || []).slice(0, 5), false);
   } catch {}
 }
 
@@ -432,9 +921,11 @@ async function retryJob(id) {
 async function loadPrinters() {
   try {
     const d = await api('GET', '/api/printers');
+    // Full table
     const tbody = document.getElementById('printerTable');
     if (!d.printers || d.printers.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#aaa;padding:20px">No printers configured</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><p>No printers configured</p></div></td></tr>';
+      document.getElementById('overviewPrinterTable').innerHTML = '<tr><td colspan="3"><div class="empty-state"><p>No printers</p></div></td></tr>';
       return;
     }
     tbody.innerHTML = d.printers.map(p => {
@@ -443,10 +934,10 @@ async function loadPrinters() {
         : esc(p.config.printerName || '-');
       const statusCls = p.status === 'online' ? 'online' : p.status === 'offline' ? 'offline' : 'error';
       return `<tr>
-        <td><strong>${esc(p.id)}</strong></td>
+        <td><strong style="color:var(--accent-light)">${esc(p.id)}</strong></td>
         <td>${esc(p.config.name)}</td>
-        <td>${esc(p.config.type)}</td>
-        <td style="font-size:12px">${target}</td>
+        <td style="color:var(--text-dim)">${esc(p.config.type)}</td>
+        <td style="font-size:12px;font-family:'SF Mono',Monaco,monospace;color:var(--text-dim)">${target}</td>
         <td><span class="badge ${statusCls}">${esc(p.status)}</span></td>
         <td class="actions">
           <button class="btn btn-outline btn-sm" onclick="testPrinter('${esc(p.id)}')">Test</button>
@@ -454,6 +945,16 @@ async function loadPrinters() {
           <button class="btn btn-outline btn-sm" onclick="editPrinter('${esc(p.id)}')">Edit</button>
           <button class="btn btn-danger btn-sm" onclick="deletePrinter('${esc(p.id)}')">Del</button>
         </td>
+      </tr>`;
+    }).join('');
+
+    // Overview mini table
+    document.getElementById('overviewPrinterTable').innerHTML = d.printers.slice(0, 5).map(p => {
+      const statusCls = p.status === 'online' ? 'online' : p.status === 'offline' ? 'offline' : 'error';
+      return `<tr>
+        <td>${esc(p.config.name)}</td>
+        <td style="color:var(--text-dim)">${esc(p.config.type)}</td>
+        <td><span class="badge ${statusCls}">${esc(p.status)}</span></td>
       </tr>`;
     }).join('');
   } catch {}
@@ -500,11 +1001,15 @@ async function loadConfig() {
 
 async function saveServerConfig() {
   try {
-    await api('PUT', '/api/config/server', {
+    const d = await api('PUT', '/api/config/server', {
       host: document.getElementById('cfgHost').value,
       port: parseInt(document.getElementById('cfgPort').value) || 9100
     });
-    toast('Server config saved (restart required for host/port changes)');
+    if (d.success) {
+      toast(d.message || 'Server config saved');
+    } else {
+      toast(d.message || d.error || 'Failed to save', 'error');
+    }
   } catch (e) { toast('Failed to save', 'error'); }
 }
 
@@ -522,8 +1027,15 @@ async function saveSecurityConfig() {
     } else {
       body.enableApiKey = false;
     }
-    await api('PUT', '/api/config/security', body);
-    toast('Security config saved');
+    const d = await api('PUT', '/api/config/security', body);
+    if (d.success) {
+      toast(d.message || 'Security config saved');
+      if (d.security && d.security.apiKey) {
+        __API_KEY = d.security.apiKey;
+      }
+    } else {
+      toast(d.message || d.error || 'Failed to save', 'error');
+    }
   } catch (e) { toast('Failed to save', 'error'); }
 }
 
@@ -641,11 +1153,11 @@ async function savePrinter() {
 
   try {
     if (editId) {
-      await api('PUT', `/api/config/printers/${editId}`, body);
-      toast('Printer updated (restart service to apply changes)');
+      const d = await api('PUT', `/api/config/printers/${editId}`, body);
+      toast(d.message || 'Printer updated');
     } else {
-      await api('POST', '/api/config/printers', body);
-      toast('Printer added (restart service to apply changes)');
+      const d = await api('POST', '/api/config/printers', body);
+      toast(d.message || 'Printer added');
     }
     closeModal();
     loadPrinters();
@@ -659,6 +1171,9 @@ async function savePrinter() {
 // ── Init ──
 (async () => {
   await discoverPort();
+  await fetchApiKey();
+  // Route from URL hash or default to overview
+  handleRoute();
   loadHealth();
   loadPrinters();
   loadConfig();
@@ -667,7 +1182,6 @@ async function savePrinter() {
   loadJobs();
 })();
 
-// Auto-refresh every 10 seconds
 setInterval(() => { 
   loadHealth(); 
   loadPrinters(); 
