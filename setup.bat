@@ -1,143 +1,119 @@
 @echo off
 setlocal EnableDelayedExpansion
-REM ============================================
-REM   XP Thermal Service - One-Click Setup
-REM   Powered by XenithPulse.com
-REM ============================================
-REM
-REM   Double-click this file to install.
-REM   It will:
-REM     1. Check for Node.js
-REM     2. Install dependencies
-REM     3. Build the service
-REM     4. Register as a Windows service (auto-start)
-REM     5. Open the configuration dashboard
-REM
-REM   Requires: Administrator privileges
-REM ============================================
+title XP Thermal Print Service - Setup
+mode con: cols=74 lines=50
+color 0F
+chcp 65001 >nul 2>&1
 
 echo.
-echo   =========================================
-echo    XP Thermal Service - Setup
-echo    Powered by XenithPulse.com
-echo   =========================================
+echo   +================================================================+
+echo   ::                                                              ::
+echo   ::    XP Thermal Print Service                                  ::
+echo   ::    Enterprise Setup v2.2                                     ::
+echo   ::                                                              ::
+echo   ::    Powered by XenithPulse.com                                ::
+echo   ::                                                              ::
+echo   +================================================================+
 echo.
 
-REM Check admin
+REM -- Admin check -------------------------------------------------------
 net session >nul 2>&1
 if %errorLevel% neq 0 (
-    echo   [!] Administrator privileges required.
-    echo       Right-click this file and choose
-    echo       "Run as administrator"
+    echo   +----------------------------------------------------------------+
+    echo   ::  This installer requires Administrator privileges.            ::
+    echo   ::                                                              ::
+    echo   ::  Right-click setup.bat and choose "Run as administrator"     ::
+    echo   +----------------------------------------------------------------+
     echo.
     pause
     exit /b 1
 )
 
-REM Navigate to project root (where this bat lives)
 cd /d "%~dp0"
 
-REM Step 1: Check Node.js
-echo   [1/5] Checking Node.js...
+REM -- Preparing environment ---------------------------------------------
+echo   Preparing Environment
+echo   ----------------------------------------------------------------
+echo.
 where node >nul 2>&1
 if %errorLevel% neq 0 (
-    echo.
-    echo   [!] Node.js is not installed.
-    echo       Download and install Node.js 18+ from:
-    echo       https://nodejs.org
+    echo        X  Node.js is not installed.
+    echo           Download v18+ from https://nodejs.org
     echo.
     pause
     exit /b 1
 )
-for /f "tokens=*" %%i in ('node --version') do echo         Found Node.js %%i
+for /f "tokens=*" %%i in ('node --version') do set NODE_VER=%%i
+echo        OK  Node.js %NODE_VER%
 
-REM Step 2: Install dependencies
-echo   [2/5] Installing dependencies...
-call npm install >nul 2>&1
+echo        ..  Installing dependencies...
+call npm install --silent >nul 2>&1
 if %errorLevel% neq 0 (
-    echo   [!] npm install failed. Check your network connection.
+    echo        X  npm install failed. Check your network connection.
+    echo.
     pause
     exit /b 1
 )
-echo         Done.
+echo        OK  Dependencies installed
 
-REM Step 3: Build
-echo   [3/5] Building service...
+echo        ..  Building service...
 call npm run build >nul 2>&1
 if %errorLevel% neq 0 (
-    echo   [!] Build failed. Check for TypeScript errors.
+    echo        X  Build failed. Check for TypeScript errors.
+    echo.
     pause
     exit /b 1
 )
-echo         Done.
+echo        OK  Build complete
+echo.
 
-REM Step 4: Create default config if missing
 if not exist "config.json" (
-    echo   [*] Creating default config.json...
     copy "config.example.json" "config.json" >nul 2>&1
 )
 
-REM Step 5: Install as Windows service
-echo   [4/5] Installing Windows service...
+REM -- Installing Windows service ----------------------------------------
+echo   Installing Windows Service
+echo   ----------------------------------------------------------------
 echo.
-PowerShell -ExecutionPolicy Bypass -File "scripts\install.ps1"
 
+PowerShell -ExecutionPolicy Bypass -File "scripts\install.ps1"
 set INSTALL_RESULT=%errorLevel%
 
-REM Step 6: Done - open dashboard
-echo.
-echo   [5/5] Setup complete!
-echo.
-
 if %INSTALL_RESULT% neq 0 (
-    echo   =========================================
-    echo    Installation had issues
-    echo   =========================================
     echo.
-    echo   The service installation encountered problems.
-    echo   Please check the logs above for details.
+    echo   +----------------------------------------------------------------+
+    echo   ::  Installation did not complete successfully.                  ::
+    echo   ::                                                              ::
+    echo   ::  Troubleshooting:                                            ::
+    echo   ::    1. Ensure you are running as Administrator                ::
+    echo   ::    2. Run  scripts\uninstall.bat  to clean up first          ::
+    echo   ::    3. Check logs in %%TEMP%%\XPThermalInstall_*.log            ::
+    echo   +----------------------------------------------------------------+
     echo.
-    echo   You can try:
-    echo     1. Run as Administrator
-    echo     2. Run scripts\uninstall.bat first
-    echo     3. Check the installation log in %%TEMP%%
-    echo.
-) else (
-    echo   =========================================
-    echo    XP Thermal Service is now installed!
-    echo   =========================================
-    echo.
-    
-    REM Try to read actual port from install location
-    set "DASHBOARD_PORT=9100"
-    if exist "%ProgramData%\XPThermalService\active_port.txt" (
-        set /p DASHBOARD_PORT=<"%ProgramData%\XPThermalService\active_port.txt"
-    )
-    
-    echo   Dashboard:  http://127.0.0.1:!DASHBOARD_PORT!/dashboard
-    echo   API:        http://127.0.0.1:!DASHBOARD_PORT!/health
-    echo.
-    echo   The service will:
-    echo     - Start automatically on boot
-    echo     - Auto-restart if it crashes
-    echo     - Be monitored by a watchdog
-    echo.
-    echo   Opening dashboard in your browser...
-    echo.
-    
-    timeout /t 3 >nul
-    
-    REM Try each possible port
-    for /L %%p in (9100,1,9110) do (
-        curl -s -o nul -w "" http://127.0.0.1:%%p/health >nul 2>&1
-        if !errorLevel! equ 0 (
-            start http://127.0.0.1:%%p/dashboard
-            goto :done
-        )
-    )
-    REM Fallback
-    start http://127.0.0.1:9100/dashboard
+    pause
+    exit /b 1
 )
 
+timeout /t 2 /nobreak >nul
+
+REM -- Open dashboard ----------------------------------------------------
+for /L %%p in (9100,1,9110) do (
+    curl -s -o nul -w "" http://127.0.0.1:%%p/health >nul 2>&1
+    if !errorLevel! equ 0 (
+        start http://127.0.0.1:%%p/dashboard
+        goto :done
+    )
+)
+
+set "PORT=9100"
+if exist "%ProgramData%\XPThermalService\active_port.txt" (
+    set /p PORT=<"%ProgramData%\XPThermalService\active_port.txt"
+)
+start http://127.0.0.1:!PORT!/dashboard
+
 :done
-pause
+echo.
+echo   Opening dashboard in your browser...
+echo.
+echo   Press any key to close this window.
+pause >nul

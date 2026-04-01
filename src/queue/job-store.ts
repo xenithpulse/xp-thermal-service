@@ -384,8 +384,8 @@ export class JobStore {
     const result = this.db.exec(`
       SELECT * FROM jobs WHERE status = ?
       ORDER BY created_at DESC
-      LIMIT ${limit}
-    `, [status]);
+      LIMIT ?
+    `, [status, limit]);
 
     if (result.length === 0) return [];
     return result[0].values.map(row => this.rowToJob(result[0].columns, row));
@@ -400,8 +400,8 @@ export class JobStore {
     const result = this.db.exec(`
       SELECT * FROM jobs WHERE printer_id = ?
       ORDER BY created_at DESC
-      LIMIT ${limit}
-    `, [printerId]);
+      LIMIT ?
+    `, [printerId, limit]);
 
     if (result.length === 0) return [];
     return result[0].values.map(row => this.rowToJob(result[0].columns, row));

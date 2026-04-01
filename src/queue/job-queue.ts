@@ -160,7 +160,7 @@ export class JobQueue extends EventEmitter {
   /**
    * Mark job as failed (with potential retry)
    */
-  fail(jobId: string, error: string): void {
+  fail(jobId: string, error: string, isRetryable: boolean = true): void {
     const job = this.store.getById(jobId);
     if (!job) {
       this.processingJobs.delete(jobId);
@@ -168,7 +168,7 @@ export class JobQueue extends EventEmitter {
     }
 
     const attempts = job.attempts + 1;
-    const shouldRetry = attempts < job.maxAttempts;
+    const shouldRetry = isRetryable && attempts < job.maxAttempts;
     
     this.store.markFailed(jobId, error, shouldRetry);
     this.processingJobs.delete(jobId);

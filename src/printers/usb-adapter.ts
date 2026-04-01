@@ -50,6 +50,29 @@ export class USBPrinterAdapter extends BasePrinterAdapter {
     if (!fs.existsSync(this.tempDir)) {
       fs.mkdirSync(this.tempDir, { recursive: true });
     }
+
+    // Clean up stale temp files from previous crashes
+    this.cleanStaleTempFiles();
+  }
+
+  /**
+   * Remove stale .bin temp files left behind by previous process crashes.
+   */
+  private cleanStaleTempFiles(): void {
+    try {
+      const files = fs.readdirSync(this.tempDir);
+      for (const file of files) {
+        if (file.startsWith('print_') && file.endsWith('.bin')) {
+          try {
+            fs.unlinkSync(path.join(this.tempDir, file));
+          } catch {
+            // Ignore individual file cleanup errors
+          }
+        }
+      }
+    } catch {
+      // Ignore if directory doesn't exist or can't be read
+    }
   }
 
   async connect(): Promise<void> {

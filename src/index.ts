@@ -151,6 +151,9 @@ export class ThermalPrintService extends EventEmitter {
       // Initialize components
       this.initialize();
 
+      // Ensure job store is fully initialized before accepting requests
+      await this.jobStore.waitForInit();
+
       // Start the API server (smart port handling)
       await this.apiServer.start();
 
@@ -223,6 +226,9 @@ export class ThermalPrintService extends EventEmitter {
       await this.printerManager.shutdown();
       this.jobQueue.close();
 
+      // Clean up active port files so stale ports aren't read
+      this.cleanActivePortFile();
+
       this.isRunning = false;
       this.emit(ServiceEvent.SERVICE_STOPPED, { timestamp: Date.now() });
       this.logger.info('XP Thermal Service stopped');
@@ -241,22 +247,45 @@ export class ThermalPrintService extends EventEmitter {
    */
   private writeActivePortFile(port: number): void {
     try {
-      const portFile = path.join(process.cwd(), 'data', 'active_port.txt');
-      const portDir = path.dirname(portFile);
-      
-      // Ensure data directory exists
+      const cwd = process.cwd();
+      const portStr = port.toString();
+
+      // Write to data/ subdirectory
+      const dataPortFile = path.join(cwd, 'data', 'active_port.txt');
+      const portDir = path.dirname(dataPortFile);
       if (!fs.existsSync(portDir)) {
         fs.mkdirSync(portDir, { recursive: true });
       }
+      fs.writeFileSync(dataPortFile, portStr, 'utf8');
+
+      // Also write to root of install directory for easy external discovery
+      const rootPortFile = path.join(cwd, 'active_port.txt');
+      fs.writeFileSync(rootPortFile, portStr, 'utf8');
       
-      // Write port atomically (write to temp, then rename)
-      const tempFile = `${portFile}.tmp`;
-      fs.writeFileSync(tempFile, port.toString(), 'utf8');
-      fs.renameSync(tempFile, portFile);
-      
-      this.logger.debug({ portFile, port }, 'Active port file written');
+      this.logger.debug({ dataPortFile, rootPortFile, port }, 'Active port files written');
     } catch (error) {
       this.logger.warn({ error }, 'Failed to write active port file');
+    }
+  }
+
+  /**
+   * Remove active port files on shutdown to prevent stale port references.
+   */
+  private cleanActivePortFile(): void {
+    try {
+      const cwd = process.cwd();
+      const files = [
+        path.join(cwd, 'data', 'active_port.txt'),
+        path.join(cwd, 'active_port.txt'),
+      ];
+      for (const file of files) {
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file);
+        }
+      }
+      this.logger.debug('Active port files cleaned up');
+    } catch (error) {
+      this.logger.warn({ error }, 'Failed to clean active port files');
     }
   }
 
@@ -306,7 +335,7 @@ export class ThermalPrintService extends EventEmitter {
 // ─────────────────────────────────────────────────────────────────────────────
 const PRODUCTION_CONFIG = {
   // Startup delay when running as Windows service (allows system to stabilize)
-  serviceStartupDelayMs: 5000,
+  serviceStartupDelayMs: 3000,
   // Memory threshold for warning (512MB)
   memoryWarningThresholdMB: 512,
   // Memory threshold for restart suggestion (1GB)
@@ -321,10 +350,13 @@ const PRODUCTION_CONFIG = {
  * Main entry point
  */
 async function main(): Promise<void> {
-  // When running as a Windows service, CWD is not the project directory
-  // (e.g. C:\Windows\System32). Anchor CWD to the project root so that
-  // relative paths (config.json, data/jobs.db, logs) resolve correctly.
-  const projectRoot = path.resolve(__dirname, '..');
+  // When running as a Windows service, CWD may not be the project directory.
+  // Detect project root: if dist files are copied flat into the install dir
+  // (e.g. C:\ProgramData\XPThermalService\index.js), use __dirname.
+  // If running from dist/ subfolder during development, go up one level.
+  const projectRoot = fs.existsSync(path.join(__dirname, 'package.json'))
+    ? __dirname
+    : path.resolve(__dirname, '..');
   process.chdir(projectRoot);
 
   // Check for CLI arguments
@@ -452,7 +484,9 @@ For more information, see the documentation.
       
       // Check memory thresholds
       if (rssMB > PRODUCTION_CONFIG.memoryRestartThresholdMB) {
-        console.warn(`MEMORY WARNING: RSS ${rssMB}MB exceeds restart threshold. Consider restarting service.`);
+        console.warn(`MEMORY CRITICAL: RSS ${rssMB}MB exceeds restart threshold. Initiating graceful restart...`);
+        shutdown('MEMORY_LIMIT');
+        return;
       } else if (rssMB > PRODUCTION_CONFIG.memoryWarningThresholdMB) {
         console.warn(`MEMORY WARNING: RSS ${rssMB}MB exceeds warning threshold.`);
       }

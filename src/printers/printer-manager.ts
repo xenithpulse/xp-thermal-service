@@ -30,6 +30,7 @@ export class PrinterManager extends EventEmitter {
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private readonly logger: Logger;
   private readonly healthCheckInterval: number;
+  private _initializing = false;
 
   constructor(config: PrinterManagerConfig, logger: Logger) {
     super();
@@ -230,22 +231,27 @@ export class PrinterManager extends EventEmitter {
    * Connect to all enabled printers
    */
   async connectAll(): Promise<Map<string, Error | null>> {
+    this._initializing = true;
     const results = new Map<string, Error | null>();
     
-    const connectPromises = Array.from(this.printers.entries())
-      .filter(([id]) => this.configs.get(id)?.enabled)
-      .map(async ([id, adapter]) => {
-        try {
-          await adapter.connect();
-          results.set(id, null);
-          this.logger.info(`Connected to printer: ${id}`);
-        } catch (error) {
-          results.set(id, error as Error);
-          this.logger.error(`Failed to connect to printer ${id}:`, error);
-        }
-      });
+    try {
+      const connectPromises = Array.from(this.printers.entries())
+        .filter(([id]) => this.configs.get(id)?.enabled)
+        .map(async ([id, adapter]) => {
+          try {
+            await adapter.connect();
+            results.set(id, null);
+            this.logger.info(`Connected to printer: ${id}`);
+          } catch (error) {
+            results.set(id, error as Error);
+            this.logger.error(`Failed to connect to printer ${id}:`, error);
+          }
+        });
 
-    await Promise.allSettled(connectPromises);
+      await Promise.allSettled(connectPromises);
+    } finally {
+      this._initializing = false;
+    }
     
     // Start health check after connecting
     this.startHealthCheck();
@@ -441,11 +447,16 @@ export class PrinterManager extends EventEmitter {
   /**
    * Get summary of printer states
    */
+  get isInitializing(): boolean {
+    return this._initializing;
+  }
+
   getSummary(): {
     total: number;
     online: number;
     offline: number;
     error: number;
+    initializing: boolean;
   } {
     let online = 0;
     let offline = 0;
@@ -469,7 +480,8 @@ export class PrinterManager extends EventEmitter {
       total: this.printers.size,
       online,
       offline,
-      error
+      error,
+      initializing: this._initializing
     };
   }
 

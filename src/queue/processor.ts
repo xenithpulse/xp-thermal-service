@@ -242,12 +242,7 @@ export class JobProcessor extends EventEmitter {
       // Determine if this is a retryable error
       const isRetryable = this.isRetryableError(error as Error);
       
-      if (isRetryable) {
-        this.queue.fail(job.id, errorMessage);
-      } else {
-        // Non-retryable errors go straight to failed
-        this.queue.fail(job.id, `Non-retryable error: ${errorMessage}`);
-      }
+      this.queue.fail(job.id, errorMessage, isRetryable);
 
       const result: JobResult = {
         success: false,

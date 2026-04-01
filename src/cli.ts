@@ -6,8 +6,38 @@
 
 import { Command } from 'commander';
 import * as readline from 'readline';
+import * as path from 'path';
+import * as fs from 'fs';
 import { WindowsServiceManager } from './service/installer';
 import { ThermalPrintService } from './index';
+
+/**
+ * Read the active port from active_port.txt, falling back to default 9100.
+ * Scans known locations: CWD, CWD/data, common install paths.
+ */
+function getActivePort(): number {
+  const candidates = [
+    path.join(process.cwd(), 'active_port.txt'),
+    path.join(process.cwd(), 'data', 'active_port.txt'),
+    path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'XPThermalService', 'active_port.txt'),
+    path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'XPThermalService', 'data', 'active_port.txt'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const port = parseInt(fs.readFileSync(candidate, 'utf8').trim(), 10);
+        if (port >= 1 && port <= 65535) {
+          return port;
+        }
+      }
+    } catch {
+      // Ignore read errors, try next
+    }
+  }
+
+  return 9100; // Default fallback
+}
 
 // API Response types
 interface HealthResponse {
@@ -30,7 +60,7 @@ interface PrinterInfo {
 }
 
 interface PrintersResponse {
-  data: PrinterInfo[];
+  printers: PrinterInfo[];
 }
 
 const program = new Command();
@@ -194,7 +224,8 @@ program
 
     // Check if running by trying to connect to the API
     try {
-      const response = await fetch('http://127.0.0.1:9100/api/health', {
+      const activePort = getActivePort();
+      const response = await fetch(`http://127.0.0.1:${activePort}/api/health`, {
         signal: AbortSignal.timeout(2000)
       });
       
@@ -221,14 +252,16 @@ program
     console.log('Sending test print...');
 
     try {
-      const response = await fetch('http://127.0.0.1:9100/api/print', {
+      const activePort = getActivePort();
+      const response = await fetch(`http://127.0.0.1:${activePort}/api/print`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          templateId: 'test',
+          idempotencyKey: `cli_test_${Date.now()}`,
+          templateType: 'test',
           printerId: options.printer,
-          priority: 10,
-          data: {
+          priority: 2,
+          payload: {
             message: 'Manual test print from CLI',
             timestamp: new Date().toISOString()
           }
@@ -261,7 +294,8 @@ program
   .description('List configured printers')
   .action(async () => {
     try {
-      const response = await fetch('http://127.0.0.1:9100/api/printers', {
+      const activePort = getActivePort();
+      const response = await fetch(`http://127.0.0.1:${activePort}/api/printers`, {
         signal: AbortSignal.timeout(2000)
       });
 
@@ -270,7 +304,7 @@ program
       }
 
       const result = await response.json() as PrintersResponse;
-      const printers = result.data;
+      const printers = result.printers;
 
       if (printers.length === 0) {
         console.log('No printers configured.');
@@ -301,11 +335,12 @@ program
     }
   });
 
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
+function formatUptime(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = Math.floor(totalSeconds % 60);
 
   const parts: string[] = [];
   if (days > 0) parts.push(`${days}d`);

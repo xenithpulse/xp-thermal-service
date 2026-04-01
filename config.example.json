@@ -10,15 +10,14 @@
       "http://127.0.0.1:3000",
       "http://localhost:3001",
       "http://127.0.0.1:3001",
-      "https://xp-pos.vercel.app",
-      "*"
+      "https://xp-pos.vercel.app"
     ],
     "allowedHosts": [
       "localhost",
       "127.0.0.1"
     ],
     "rateLimitPerMinute": 120,
-    "enableApiKey": false,
+    "enableApiKey": true,
     "maxPayloadSize": 1048576
   },
   "queue": {

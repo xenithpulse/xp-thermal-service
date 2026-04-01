@@ -132,8 +132,7 @@ export enum TemplateType {
   KOT = 'kot',
   INVOICE = 'invoice',
   TEST = 'test',
-  RAW = 'raw',
-  LABEL = 'label'
+  RAW = 'raw'
 }
 
 export interface ReceiptPayload {
@@ -332,13 +331,14 @@ export interface PrinterListResponse {
 }
 
 export interface HealthResponse {
-  status: 'healthy' | 'degraded' | 'unhealthy';
+  status: 'healthy' | 'initializing';
   uptime: number;
   version: string;
   printers: {
     total: number;
     online: number;
     offline: number;
+    initializing: boolean;
   };
   queue: {
     pending: number;

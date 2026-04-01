@@ -4,6 +4,8 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
+import { spawn } from 'child_process';
 
 // We'll use node-windows for Windows service management
 let Service: typeof import('node-windows').Service;
@@ -17,6 +19,22 @@ try {
 
 const SERVICE_NAME = 'XP Thermal Print Service';
 const SERVICE_DESCRIPTION = 'Production-grade thermal printing service for restaurant POS';
+// node-windows derives the Windows service key name by lowercasing and removing
+// spaces from the display name, then appending ".exe".
+const SERVICE_KEY_NAME = 'xpthermalprintservice.exe';
+
+/**
+ * Detect project root for both dev (dist/service/) and flat install (XPThermalService/service/).
+ */
+function detectProjectRoot(): string {
+  const parentDir = path.resolve(__dirname, '..');
+  // Flat install: parent has package.json (C:\ProgramData\XPThermalService\)
+  if (fs.existsSync(path.join(parentDir, 'package.json'))) {
+    return parentDir;
+  }
+  // Dev: parent is dist/, grandparent is project root
+  return path.resolve(__dirname, '..', '..');
+}
 
 export interface ServiceOptions {
   name?: string;
@@ -30,6 +48,8 @@ export class WindowsServiceManager {
   private options: ServiceOptions;
 
   constructor(options: ServiceOptions = {}) {
+    const projectRoot = detectProjectRoot();
+
     this.options = {
       name: options.name || SERVICE_NAME,
       description: options.description || SERVICE_DESCRIPTION,
@@ -38,20 +58,15 @@ export class WindowsServiceManager {
     };
 
     if (Service) {
-      const projectRoot = path.resolve(__dirname, '..', '..');
-
       this.service = new Service({
         name: this.options.name!,
         description: this.options.description,
         script: this.options.script!,
         env: this.options.env,
-        // Service configuration
         nodeOptions: ['--max-old-space-size=256'],
-        // Enhanced restart/recovery settings for production reliability
-        maxRestarts: 10,        // Allow more restarts before giving up
-        wait: 5,                // 5 seconds between restart attempts
-        grow: 0.5,              // Grow wait time by 50% each failure
-        // Ensure the service runs from the project root so relative paths work
+        maxRestarts: 10,
+        wait: 5,
+        grow: 0.5,
         workingDirectory: projectRoot
       }) as InstanceType<typeof Service>;
     }
@@ -68,20 +83,38 @@ export class WindowsServiceManager {
       }
 
       console.log(`Installing ${this.options.name}...`);
+      console.log(`  Script: ${this.options.script}`);
+      console.log(`  WorkDir: ${detectProjectRoot()}`);
+
+      const timeout = setTimeout(() => {
+        console.log('Install+start timeout — attempting start via sc.exe...');
+        this.scStart().then(resolve).catch(reject);
+      }, 30000);
 
       this.service.on('install', () => {
-        console.log('Service installed successfully');
-        // Start the service after installation
+        console.log('Service installed, starting...');
         this.service!.start();
+      });
+
+      this.service.on('start', () => {
+        clearTimeout(timeout);
+        console.log('Service started');
         resolve();
       });
 
       this.service.on('alreadyinstalled', () => {
-        console.log('Service is already installed');
+        console.log('Service already installed, starting...');
+        this.service!.start();
+      });
+
+      (this.service as any).on('alreadyrunning', () => {
+        clearTimeout(timeout);
+        console.log('Service is already running');
         resolve();
       });
 
       this.service.on('error', (error: Error) => {
+        clearTimeout(timeout);
         reject(error);
       });
 
@@ -101,12 +134,19 @@ export class WindowsServiceManager {
 
       console.log(`Uninstalling ${this.options.name}...`);
 
+      const timeout = setTimeout(() => {
+        console.log('Uninstall timeout — forcing removal via sc.exe...');
+        this.scDelete().then(resolve).catch(reject);
+      }, 15000);
+
       this.service.on('uninstall', () => {
+        clearTimeout(timeout);
         console.log('Service uninstalled successfully');
         resolve();
       });
 
       this.service.on('error', (error: Error) => {
+        clearTimeout(timeout);
         reject(error);
       });
 
@@ -126,12 +166,25 @@ export class WindowsServiceManager {
 
       console.log(`Starting ${this.options.name}...`);
 
+      const timeout = setTimeout(() => {
+        console.log('Start event timeout — attempting start via sc.exe...');
+        this.scStart().then(resolve).catch(reject);
+      }, 15000);
+
       this.service.on('start', () => {
+        clearTimeout(timeout);
         console.log('Service started');
         resolve();
       });
 
+      (this.service as any).on('alreadyrunning', () => {
+        clearTimeout(timeout);
+        console.log('Service is already running');
+        resolve();
+      });
+
       this.service.on('error', (error: Error) => {
+        clearTimeout(timeout);
         reject(error);
       });
 
@@ -151,12 +204,19 @@ export class WindowsServiceManager {
 
       console.log(`Stopping ${this.options.name}...`);
 
+      const timeout = setTimeout(() => {
+        console.log('Stop timeout — forcing stop via sc.exe...');
+        this.scStop().then(resolve).catch(reject);
+      }, 15000);
+
       this.service.on('stop', () => {
+        clearTimeout(timeout);
         console.log('Service stopped');
         resolve();
       });
 
       this.service.on('error', (error: Error) => {
+        clearTimeout(timeout);
         reject(error);
       });
 
@@ -182,11 +242,58 @@ export class WindowsServiceManager {
         return;
       }
 
-      // Use spawn instead of exec to prevent command injection
-      const { spawn } = require('child_process');
-      const child = spawn('sc', ['query', this.options.name!], { shell: false });
-      child.on('close', (code: number) => resolve(code === 0));
+      const child = spawn('sc', ['query', SERVICE_KEY_NAME], { shell: false });
+      child.on('close', (code) => resolve(code === 0));
       child.on('error', () => resolve(false));
+    });
+  }
+
+  /** Start service via sc.exe (fallback when node-windows events don't fire) */
+  private scStart(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn('sc', ['start', SERVICE_KEY_NAME], { shell: false });
+      let output = '';
+      child.stdout?.on('data', (d) => { output += String(d); });
+      child.stderr?.on('data', (d) => { output += String(d); });
+      child.on('close', (code) => {
+        if (code === 0 || output.includes('RUNNING')) {
+          console.log('Service started via sc.exe');
+          resolve();
+        } else {
+          reject(new Error(`sc start failed (code ${code}): ${output.trim()}`));
+        }
+      });
+      child.on('error', reject);
+    });
+  }
+
+  /** Stop service via sc.exe (fallback) */
+  private scStop(): Promise<void> {
+    return new Promise((resolve) => {
+      const child = spawn('sc', ['stop', SERVICE_KEY_NAME], { shell: false });
+      child.on('close', () => {
+        console.log('Service stop sent via sc.exe');
+        resolve();
+      });
+      child.on('error', () => resolve());
+    });
+  }
+
+  /** Delete service via sc.exe (fallback) */
+  private scDelete(): Promise<void> {
+    return new Promise((resolve) => {
+      const stopChild = spawn('sc', ['stop', SERVICE_KEY_NAME], { shell: false });
+      stopChild.on('close', () => {
+        setTimeout(() => {
+          const delChild = spawn('sc', ['delete', SERVICE_KEY_NAME], { shell: false });
+          delChild.on('close', () => {
+            console.log('Service removed via sc.exe');
+            resolve();
+          });
+          delChild.on('error', () => resolve());
+        }, 2000);
+      });
+      stopChild.on('error', () => resolve());
     });
   }
 }

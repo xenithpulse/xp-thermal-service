@@ -109,7 +109,16 @@ export class ApiServer {
   private setupMiddleware(): void {
     // Security headers
     this.app.use(helmet({
-      contentSecurityPolicy: false,
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+          styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net", "https://fonts.googleapis.com"],
+          fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdn.jsdelivr.net"],
+          connectSrc: ["'self'"],
+          imgSrc: ["'self'", "data:"],
+        }
+      },
       crossOriginEmbedderPolicy: false
     }));
 
@@ -238,8 +247,12 @@ export class ApiServer {
   }
 
   private validateApiKey(req: Request, res: Response, next: NextFunction): void {
-    // Skip API key validation for health checks
-    if (req.path === '/health' || req.path === '/api/health') {
+    // Skip API key validation for health checks, dashboard, and local-token
+    if (
+      req.path === '/health' || req.path === '/api/health' ||
+      req.path === '/dashboard' || req.path === '/' ||
+      req.path === '/api/auth/local-token'
+    ) {
       return next();
     }
 
@@ -333,6 +346,9 @@ export class ApiServer {
     this.app.put('/api/config/printers/:printerId', this.handleUpdatePrinterConfig.bind(this));
     this.app.delete('/api/config/printers/:printerId', this.handleDeletePrinterConfig.bind(this));
 
+    // Local-only auth token (exempt from API key, restricted to loopback IP)
+    this.app.get('/api/auth/local-token', this.handleLocalToken.bind(this));
+
     // Dashboard (serves static HTML)
     this.app.get('/dashboard', this.handleDashboard.bind(this));
     this.app.get('/', (_req: Request, res: Response) => res.redirect('/dashboard'));
@@ -342,10 +358,11 @@ export class ApiServer {
     const printerSummary = this.printerManager.getSummary();
     const queueStats = this.queue.getStats();
 
-    const status: 'healthy' | 'degraded' | 'unhealthy' = 
-      printerSummary.online === 0 ? 'unhealthy' :
-      printerSummary.online < printerSummary.total ? 'degraded' :
-      'healthy';
+    // Service is always healthy once it's listening.
+    // Only report 'initializing' while actively scanning USB ports for printers.
+    // Printers being offline is normal and does NOT make the service unhealthy.
+    const status: 'healthy' | 'initializing' =
+      printerSummary.initializing ? 'initializing' : 'healthy';
 
     const response: HealthResponse = {
       status,
@@ -359,7 +376,32 @@ export class ApiServer {
       }
     };
 
-    res.status(status === 'healthy' ? 200 : 503).json(response);
+    res.status(200).json(response);
+  }
+
+  /**
+   * Returns the API key to callers on the loopback interface only.
+   * This allows localhost POS apps to auto-authenticate without manual config.
+   * Security: only reachable from 127.0.0.1 / ::1 (enforced by host validation
+   * middleware + explicit IP check here).
+   */
+  private handleLocalToken(req: Request, res: Response): void {
+    const remoteIp = req.ip || req.socket.remoteAddress || '';
+    const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteIp);
+
+    if (!isLoopback) {
+      this.logger.warn({ remoteIp }, 'Blocked non-loopback request to /api/auth/local-token');
+      res.status(403).json({ error: 'Forbidden', message: 'Only available from localhost' });
+      return;
+    }
+
+    if (!this.config.security.enableApiKey || !this.config.security.apiKey) {
+      // API key auth is disabled — return empty token (no key needed)
+      res.status(200).json({ apiKey: '', authRequired: false });
+      return;
+    }
+
+    res.status(200).json({ apiKey: this.config.security.apiKey, authRequired: true });
   }
 
   private async handlePrint(req: Request, res: Response): Promise<void> {
@@ -809,12 +851,30 @@ export class ApiServer {
   }
 
   private handleDashboard(_req: Request, res: Response): void {
-    const dashboardPath = path.join(__dirname, '..', '..', 'public', 'dashboard.html');
-    if (fs.existsSync(dashboardPath)) {
-      res.sendFile(dashboardPath);
-    } else {
-      res.status(404).send('Dashboard not found. Ensure public/dashboard.html exists.');
+    // Try multiple locations: flat install (cwd/public/), dev dist/ (../../public/)
+    const candidates = [
+      path.join(process.cwd(), 'public', 'dashboard.html'),
+      path.join(__dirname, '..', 'public', 'dashboard.html'),
+      path.join(__dirname, '..', '..', 'public', 'dashboard.html'),
+    ];
+
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        // Inject API key into dashboard HTML so it can authenticate API calls
+        try {
+          let html = fs.readFileSync(candidate, 'utf8');
+          const apiKey = this.config.security.enableApiKey ? (this.config.security.apiKey || '') : '';
+          const injection = `<script>window.__XP_API_KEY__=${JSON.stringify(apiKey)};</script>`;
+          html = html.replace('</head>', `${injection}\n</head>`);
+          res.type('html').send(html);
+        } catch {
+          res.sendFile(candidate);
+        }
+        return;
+      }
     }
+
+    res.status(404).send('Dashboard not found. Ensure public/dashboard.html exists.');
   }
 
   private handleError(error: unknown, res: Response): void {

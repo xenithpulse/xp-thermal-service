@@ -5,6 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { z } from 'zod';
 import {
   ServiceConfig,
@@ -74,7 +75,7 @@ const SecurityConfigSchema = z.object({
   allowedOrigins: z.array(z.string()).default(['http://localhost:3000', 'http://127.0.0.1:3000']),
   allowedHosts: z.array(z.string()).default(['localhost', '127.0.0.1']),
   rateLimitPerMinute: z.number().min(1).max(1000).default(60),
-  enableApiKey: z.boolean().default(false),
+  enableApiKey: z.boolean().default(true),
   apiKey: z.string().optional(),
   maxPayloadSize: z.number().min(1024).max(10 * 1024 * 1024).default(1024 * 1024) // 1MB default, 10MB max
 });
@@ -191,7 +192,30 @@ export class ConfigManager {
       return ServiceConfigSchema.parse({});
     }
 
-    return result.data as ServiceConfig;
+    const config = result.data as ServiceConfig;
+
+    // Auto-generate API key if auth is enabled but no key is set
+    if (config.security.enableApiKey && !config.security.apiKey) {
+      config.security.apiKey = crypto.randomBytes(32).toString('hex');
+      console.log('Generated new API key (no key was configured)');
+      // Persist the generated key back to config.json
+      try {
+        const raw = fs.existsSync(this.configPath)
+          ? JSON.parse(fs.readFileSync(this.configPath, 'utf8'))
+          : {};
+        if (!raw.security) raw.security = {};
+        raw.security.apiKey = config.security.apiKey;
+        raw.security.enableApiKey = true;
+        const tmpPath = this.configPath + '.tmp';
+        fs.writeFileSync(tmpPath, JSON.stringify(raw, null, 2), 'utf8');
+        fs.renameSync(tmpPath, this.configPath);
+        console.log(`API key saved to ${this.configPath}`);
+      } catch (err) {
+        console.error('Failed to persist generated API key:', err);
+      }
+    }
+
+    return config;
   }
 
   /**
