@@ -22,6 +22,7 @@ export interface JobStoreConfig {
 
 export class JobStore {
   private db: SqlJsDatabase | null = null;
+  private SQL: any = null;
   private logger: Logger;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private saveTimer: NodeJS.Timeout | null = null;
@@ -30,6 +31,7 @@ export class JobStore {
   private initialized = false;
   private initPromise: Promise<void> | null = null;
   private dirty = false;
+  private recovering = false;
 
   constructor(config: JobStoreConfig, logger: Logger) {
     this.logger = logger;
@@ -48,16 +50,16 @@ export class JobStore {
 
   private async initialize(cleanupIntervalMs: number): Promise<void> {
     try {
-      const SQL = await initSqlJs();
+      this.SQL = await initSqlJs();
 
       // Load existing database or create new one
       if (fs.existsSync(this.dbPath)) {
         try {
           const buffer = fs.readFileSync(this.dbPath);
-          this.db = new SQL.Database(buffer);
+          this.db = new this.SQL.Database(buffer);
           
           // Validate database integrity
-          const integrityCheck = this.db.exec("PRAGMA integrity_check");
+          const integrityCheck = this.db!.exec("PRAGMA integrity_check");
           if (integrityCheck.length > 0 && integrityCheck[0].values[0][0] !== 'ok') {
             throw new Error(`Database integrity check failed: ${integrityCheck[0].values[0][0]}`);
           }
@@ -66,10 +68,10 @@ export class JobStore {
         } catch (loadError) {
           // Database corrupted - backup and recreate
           this.logger.error(`Database corrupted, creating fresh database: ${loadError}`);
-          await this.handleCorruptDatabase(SQL);
+          await this.handleCorruptDatabase(this.SQL);
         }
       } else {
-        this.db = new SQL.Database();
+        this.db = new this.SQL.Database();
         this.logger.info(`Created new database: ${this.dbPath}`);
       }
 
@@ -121,6 +123,61 @@ export class JobStore {
     // Create fresh database
     this.db = new SQL.Database();
     this.logger.info('Created fresh database after corruption recovery');
+  }
+
+  /**
+   * Safely execute a database operation. If the WASM memory is corrupted
+   * (e.g. after long idle / Windows sleep), automatically rebuild the
+   * in-memory database from the last saved file and retry once.
+   */
+  private safeDbOp<T>(op: () => T): T {
+    try {
+      return op();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Detect WASM / native corruption errors
+      if (msg.includes('memory access out of bounds') ||
+          msg.includes('null function') ||
+          msg.includes('unreachable') ||
+          msg.includes('table index is out of bounds')) {
+        this.logger.warn(`WASM crash detected ("${msg}"), rebuilding database...`);
+        this.rebuildDatabase();
+        // Retry operation once after rebuild
+        return op();
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Rebuild the in-memory database from the last saved file on disk.
+   */
+  private rebuildDatabase(): void {
+    if (this.recovering) return;
+    this.recovering = true;
+
+    try {
+      // Close the broken handle
+      try { this.db?.close(); } catch { /* already broken */ }
+      this.db = null;
+
+      if (fs.existsSync(this.dbPath) && this.SQL) {
+        const buffer = fs.readFileSync(this.dbPath);
+        this.db = new this.SQL.Database(buffer);
+        this.logger.info('Database rebuilt from disk successfully');
+      } else if (this.SQL) {
+        this.db = new this.SQL.Database();
+        this.initSchema();
+        this.logger.warn('Database rebuilt as empty (no file on disk)');
+      } else {
+        throw new Error('sql.js not available for rebuild');
+      }
+    } catch (rebuildErr) {
+      this.logger.error(`Database rebuild failed: ${rebuildErr}`);
+      throw rebuildErr;
+    } finally {
+      this.recovering = false;
+    }
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -186,13 +243,15 @@ export class JobStore {
     if (!this.db || !this.dirty) return;
 
     try {
-      const data = this.db.export();
-      const buffer = Buffer.from(data);
-      // Atomic write: write to temp file then rename
-      const tempPath = this.dbPath + '.tmp';
-      fs.writeFileSync(tempPath, buffer);
-      fs.renameSync(tempPath, this.dbPath);
-      this.dirty = false;
+      this.safeDbOp(() => {
+        const data = this.db!.export();
+        const buffer = Buffer.from(data);
+        // Atomic write: write to temp file then rename
+        const tempPath = this.dbPath + '.tmp';
+        fs.writeFileSync(tempPath, buffer);
+        fs.renameSync(tempPath, this.dbPath);
+        this.dirty = false;
+      });
     } catch (error) {
       this.logger.error('Failed to save database:', error);
     }
@@ -251,46 +310,48 @@ export class JobStore {
       return { created: false, job: existing };
     }
 
-    try {
-      this.db.run(`
-        INSERT INTO jobs (
-          id, idempotency_key, printer_id, template_type, payload, priority,
-          status, attempts, max_attempts, created_at, updated_at, scheduled_at,
-          started_at, completed_at, error, raw_commands, metadata
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        job.id,
-        job.idempotencyKey,
-        job.printerId,
-        job.templateType,
-        JSON.stringify(job.payload),
-        job.priority,
-        job.status,
-        job.attempts,
-        job.maxAttempts,
-        job.createdAt,
-        job.updatedAt,
-        job.scheduledAt || null,
-        job.startedAt || null,
-        job.completedAt || null,
-        job.error || null,
-        job.rawCommands || null,
-        job.metadata ? JSON.stringify(job.metadata) : null
-      ]);
+    return this.safeDbOp(() => {
+      try {
+        this.db!.run(`
+          INSERT INTO jobs (
+            id, idempotency_key, printer_id, template_type, payload, priority,
+            status, attempts, max_attempts, created_at, updated_at, scheduled_at,
+            started_at, completed_at, error, raw_commands, metadata
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          job.id,
+          job.idempotencyKey,
+          job.printerId,
+          job.templateType,
+          JSON.stringify(job.payload),
+          job.priority,
+          job.status,
+          job.attempts,
+          job.maxAttempts,
+          job.createdAt,
+          job.updatedAt,
+          job.scheduledAt || null,
+          job.startedAt || null,
+          job.completedAt || null,
+          job.error || null,
+          job.rawCommands || null,
+          job.metadata ? JSON.stringify(job.metadata) : null
+        ]);
 
-      this.addHistorySync(job.id, job.status, 'Job created');
-      this.markDirty();
-      return { created: true, job };
-    } catch (error) {
-      // Handle race condition with unique constraint
-      if ((error as Error).message.includes('UNIQUE constraint failed')) {
-        const existingJob = this.getByIdempotencyKey(job.idempotencyKey);
-        if (existingJob) {
-          return { created: false, job: existingJob };
+        this.addHistorySync(job.id, job.status, 'Job created');
+        this.markDirty();
+        return { created: true, job };
+      } catch (error) {
+        // Handle race condition with unique constraint
+        if ((error as Error).message.includes('UNIQUE constraint failed')) {
+          const existingJob = this.getByIdempotencyKey(job.idempotencyKey);
+          if (existingJob) {
+            return { created: false, job: existingJob };
+          }
         }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   /**
@@ -299,33 +360,35 @@ export class JobStore {
   update(job: PrintJob): void {
     if (!this.db) throw new Error('Database not initialized');
 
-    this.db.run(`
-      UPDATE jobs SET
-        status = ?,
-        attempts = ?,
-        updated_at = ?,
-        scheduled_at = ?,
-        started_at = ?,
-        completed_at = ?,
-        error = ?,
-        raw_commands = ?,
-        metadata = ?
-      WHERE id = ?
-    `, [
-      job.status,
-      job.attempts,
-      job.updatedAt,
-      job.scheduledAt || null,
-      job.startedAt || null,
-      job.completedAt || null,
-      job.error || null,
-      job.rawCommands || null,
-      job.metadata ? JSON.stringify(job.metadata) : null,
-      job.id
-    ]);
+    this.safeDbOp(() => {
+      this.db!.run(`
+        UPDATE jobs SET
+          status = ?,
+          attempts = ?,
+          updated_at = ?,
+          scheduled_at = ?,
+          started_at = ?,
+          completed_at = ?,
+          error = ?,
+          raw_commands = ?,
+          metadata = ?
+        WHERE id = ?
+      `, [
+        job.status,
+        job.attempts,
+        job.updatedAt,
+        job.scheduledAt || null,
+        job.startedAt || null,
+        job.completedAt || null,
+        job.error || null,
+        job.rawCommands || null,
+        job.metadata ? JSON.stringify(job.metadata) : null,
+        job.id
+      ]);
 
-    this.addHistorySync(job.id, job.status, job.error || undefined);
-    this.markDirty();
+      this.addHistorySync(job.id, job.status, job.error || undefined);
+      this.markDirty();
+    });
   }
 
   /**
@@ -334,12 +397,14 @@ export class JobStore {
   getById(id: string): PrintJob | null {
     if (!this.db) return null;
 
-    const result = this.db.exec('SELECT * FROM jobs WHERE id = ?', [id]);
-    if (result.length === 0 || result[0].values.length === 0) {
-      return null;
-    }
+    return this.safeDbOp(() => {
+      const result = this.db!.exec('SELECT * FROM jobs WHERE id = ?', [id]);
+      if (result.length === 0 || result[0].values.length === 0) {
+        return null;
+      }
 
-    return this.rowToJob(result[0].columns, result[0].values[0]);
+      return this.rowToJob(result[0].columns, result[0].values[0]);
+    });
   }
 
   /**
@@ -348,12 +413,14 @@ export class JobStore {
   getByIdempotencyKey(key: string): PrintJob | null {
     if (!this.db) return null;
 
-    const result = this.db.exec('SELECT * FROM jobs WHERE idempotency_key = ?', [key]);
-    if (result.length === 0 || result[0].values.length === 0) {
-      return null;
-    }
+    return this.safeDbOp(() => {
+      const result = this.db!.exec('SELECT * FROM jobs WHERE idempotency_key = ?', [key]);
+      if (result.length === 0 || result[0].values.length === 0) {
+        return null;
+      }
 
-    return this.rowToJob(result[0].columns, result[0].values[0]);
+      return this.rowToJob(result[0].columns, result[0].values[0]);
+    });
   }
 
   /**
@@ -362,17 +429,19 @@ export class JobStore {
   getPending(limit = 100): PrintJob[] {
     if (!this.db) return [];
 
-    const now = Date.now();
-    const result = this.db.exec(`
-      SELECT * FROM jobs 
-      WHERE status IN ('pending', 'queued', 'retry_scheduled')
-        AND (scheduled_at IS NULL OR scheduled_at <= ?)
-      ORDER BY priority DESC, created_at ASC
-      LIMIT ?
-    `, [now, limit]);
+    return this.safeDbOp(() => {
+      const now = Date.now();
+      const result = this.db!.exec(`
+        SELECT * FROM jobs 
+        WHERE status IN ('pending', 'queued', 'retry_scheduled')
+          AND (scheduled_at IS NULL OR scheduled_at <= ?)
+        ORDER BY priority DESC, created_at ASC
+        LIMIT ?
+      `, [now, limit]);
 
-    if (result.length === 0) return [];
-    return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+      if (result.length === 0) return [];
+      return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+    });
   }
 
   /**
@@ -381,14 +450,16 @@ export class JobStore {
   getByStatus(status: JobStatus, limit = 100): PrintJob[] {
     if (!this.db) return [];
 
-    const result = this.db.exec(`
-      SELECT * FROM jobs WHERE status = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `, [status, limit]);
+    return this.safeDbOp(() => {
+      const result = this.db!.exec(`
+        SELECT * FROM jobs WHERE status = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `, [status, limit]);
 
-    if (result.length === 0) return [];
-    return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+      if (result.length === 0) return [];
+      return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+    });
   }
 
   /**
@@ -397,14 +468,16 @@ export class JobStore {
   getByPrinter(printerId: string, limit = 100): PrintJob[] {
     if (!this.db) return [];
 
-    const result = this.db.exec(`
-      SELECT * FROM jobs WHERE printer_id = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `, [printerId, limit]);
+    return this.safeDbOp(() => {
+      const result = this.db!.exec(`
+        SELECT * FROM jobs WHERE printer_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `, [printerId, limit]);
 
-    if (result.length === 0) return [];
-    return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+      if (result.length === 0) return [];
+      return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+    });
   }
 
   /**
@@ -413,9 +486,11 @@ export class JobStore {
   delete(id: string): void {
     if (!this.db) return;
 
-    this.db.run('DELETE FROM jobs WHERE id = ?', [id]);
-    this.db.run('DELETE FROM job_history WHERE job_id = ?', [id]);
-    this.markDirty();
+    this.safeDbOp(() => {
+      this.db!.run('DELETE FROM jobs WHERE id = ?', [id]);
+      this.db!.run('DELETE FROM job_history WHERE job_id = ?', [id]);
+      this.markDirty();
+    });
   }
 
   /**
@@ -432,28 +507,30 @@ export class JobStore {
       return { total: 0, pending: 0, processing: 0, completed: 0, failed: 0 };
     }
 
-    const result = this.db.exec(`
-      SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-      FROM jobs
-    `);
+    return this.safeDbOp(() => {
+      const result = this.db!.exec(`
+        SELECT 
+          COUNT(*) as total,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+          SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+        FROM jobs
+      `);
 
-    if (result.length === 0) {
-      return { total: 0, pending: 0, processing: 0, completed: 0, failed: 0 };
-    }
+      if (result.length === 0) {
+        return { total: 0, pending: 0, processing: 0, completed: 0, failed: 0 };
+      }
 
-    const row = result[0].values[0];
-    return {
-      total: (row[0] as number) || 0,
-      pending: (row[1] as number) || 0,
-      processing: (row[2] as number) || 0,
-      completed: (row[3] as number) || 0,
-      failed: (row[4] as number) || 0
-    };
+      const row = result[0].values[0];
+      return {
+        total: (row[0] as number) || 0,
+        pending: (row[1] as number) || 0,
+        processing: (row[2] as number) || 0,
+        completed: (row[3] as number) || 0,
+        failed: (row[4] as number) || 0
+      };
+    });
   }
 
   /**
@@ -462,16 +539,18 @@ export class JobStore {
   markStarted(id: string): void {
     if (!this.db) return;
 
-    const now = Date.now();
-    this.db.run(`
-      UPDATE jobs SET
-        status = 'processing',
-        started_at = ?,
-        updated_at = ?
-      WHERE id = ?
-    `, [now, now, id]);
-    this.addHistorySync(id, 'processing', 'Job started processing');
-    this.markDirty();
+    this.safeDbOp(() => {
+      const now = Date.now();
+      this.db!.run(`
+        UPDATE jobs SET
+          status = 'processing',
+          started_at = ?,
+          updated_at = ?
+        WHERE id = ?
+      `, [now, now, id]);
+      this.addHistorySync(id, 'processing', 'Job started processing');
+      this.markDirty();
+    });
   }
 
   /**
@@ -480,15 +559,17 @@ export class JobStore {
   markPrinting(id: string): void {
     if (!this.db) return;
 
-    const now = Date.now();
-    this.db.run(`
-      UPDATE jobs SET
-        status = 'printing',
-        updated_at = ?
-      WHERE id = ?
-    `, [now, id]);
-    this.addHistorySync(id, 'printing', 'Sending to printer');
-    this.markDirty();
+    this.safeDbOp(() => {
+      const now = Date.now();
+      this.db!.run(`
+        UPDATE jobs SET
+          status = 'printing',
+          updated_at = ?
+        WHERE id = ?
+      `, [now, id]);
+      this.addHistorySync(id, 'printing', 'Sending to printer');
+      this.markDirty();
+    });
   }
 
   /**
@@ -497,17 +578,19 @@ export class JobStore {
   markCompleted(id: string): void {
     if (!this.db) return;
 
-    const now = Date.now();
-    this.db.run(`
-      UPDATE jobs SET
-        status = 'completed',
-        completed_at = ?,
-        updated_at = ?,
-        error = NULL
-      WHERE id = ?
-    `, [now, now, id]);
-    this.addHistorySync(id, 'completed', 'Job completed successfully');
-    this.markDirty();
+    this.safeDbOp(() => {
+      const now = Date.now();
+      this.db!.run(`
+        UPDATE jobs SET
+          status = 'completed',
+          completed_at = ?,
+          updated_at = ?,
+          error = NULL
+        WHERE id = ?
+      `, [now, now, id]);
+      this.addHistorySync(id, 'completed', 'Job completed successfully');
+      this.markDirty();
+    });
   }
 
   /**
@@ -516,20 +599,22 @@ export class JobStore {
   markFailed(id: string, error: string, willRetry: boolean): void {
     if (!this.db) return;
 
-    const now = Date.now();
-    const status = willRetry ? 'retry_scheduled' : 'failed';
+    this.safeDbOp(() => {
+      const now = Date.now();
+      const status = willRetry ? 'retry_scheduled' : 'failed';
 
-    this.db.run(`
-      UPDATE jobs SET
-        status = ?,
-        attempts = attempts + 1,
-        updated_at = ?,
-        error = ?
-      WHERE id = ?
-    `, [status, now, error, id]);
+      this.db!.run(`
+        UPDATE jobs SET
+          status = ?,
+          attempts = attempts + 1,
+          updated_at = ?,
+          error = ?
+        WHERE id = ?
+      `, [status, now, error, id]);
 
-    this.addHistorySync(id, status, error);
-    this.markDirty();
+      this.addHistorySync(id, status, error);
+      this.markDirty();
+    });
   }
 
   /**
@@ -538,16 +623,18 @@ export class JobStore {
   scheduleRetry(id: string, delayMs: number): void {
     if (!this.db) return;
 
-    const now = Date.now();
-    this.db.run(`
-      UPDATE jobs SET
-        status = 'retry_scheduled',
-        scheduled_at = ?,
-        updated_at = ?
-      WHERE id = ?
-    `, [now + delayMs, now, id]);
-    this.addHistorySync(id, 'retry_scheduled', `Retry scheduled in ${delayMs}ms`);
-    this.markDirty();
+    this.safeDbOp(() => {
+      const now = Date.now();
+      this.db!.run(`
+        UPDATE jobs SET
+          status = 'retry_scheduled',
+          scheduled_at = ?,
+          updated_at = ?
+        WHERE id = ?
+      `, [now + delayMs, now, id]);
+      this.addHistorySync(id, 'retry_scheduled', `Retry scheduled in ${delayMs}ms`);
+      this.markDirty();
+    });
   }
 
   /**
@@ -556,15 +643,17 @@ export class JobStore {
   moveToDeadLetter(id: string): void {
     if (!this.db) return;
 
-    const now = Date.now();
-    this.db.run(`
-      UPDATE jobs SET
-        status = 'dead_letter',
-        updated_at = ?
-      WHERE id = ?
-    `, [now, id]);
-    this.addHistorySync(id, 'dead_letter', 'Moved to dead letter queue after max retries');
-    this.markDirty();
+    this.safeDbOp(() => {
+      const now = Date.now();
+      this.db!.run(`
+        UPDATE jobs SET
+          status = 'dead_letter',
+          updated_at = ?
+        WHERE id = ?
+      `, [now, id]);
+      this.addHistorySync(id, 'dead_letter', 'Moved to dead letter queue after max retries');
+      this.markDirty();
+    });
   }
 
   /**
@@ -577,20 +666,22 @@ export class JobStore {
   }> {
     if (!this.db) return [];
 
-    const result = this.db.exec(`
-      SELECT status, timestamp, details 
-      FROM job_history 
-      WHERE job_id = ? 
-      ORDER BY timestamp ASC
-    `, [jobId]);
+    return this.safeDbOp(() => {
+      const result = this.db!.exec(`
+        SELECT status, timestamp, details 
+        FROM job_history 
+        WHERE job_id = ? 
+        ORDER BY timestamp ASC
+      `, [jobId]);
 
-    if (result.length === 0) return [];
+      if (result.length === 0) return [];
 
-    return result[0].values.map(row => ({
-      status: row[0] as string,
-      timestamp: row[1] as number,
-      details: row[2] as string | undefined
-    }));
+      return result[0].values.map(row => ({
+        status: row[0] as string,
+        timestamp: row[1] as number,
+        details: row[2] as string | undefined
+      }));
+    });
   }
 
   /**
@@ -599,10 +690,14 @@ export class JobStore {
   private addHistorySync(jobId: string, status: string, details?: string): void {
     if (!this.db) return;
 
-    this.db.run(`
-      INSERT INTO job_history (job_id, status, timestamp, details)
-      VALUES (?, ?, ?, ?)
-    `, [jobId, status, Date.now(), details || null]);
+    try {
+      this.db.run(`
+        INSERT INTO job_history (job_id, status, timestamp, details)
+        VALUES (?, ?, ?, ?)
+      `, [jobId, status, Date.now(), details || null]);
+    } catch {
+      // History is non-critical — don't let it break the calling operation
+    }
   }
 
   /**
@@ -611,36 +706,35 @@ export class JobStore {
   cleanup(): number {
     if (!this.db) return 0;
 
-    const cutoff = Date.now() - this.maxJobAgeMs;
+    return this.safeDbOp(() => {
+      const cutoff = Date.now() - this.maxJobAgeMs;
 
-    // Count jobs to be deleted
-    const countResult = this.db.exec(`
-      SELECT COUNT(*) FROM jobs 
-      WHERE status IN ('completed', 'dead_letter', 'cancelled')
-        AND updated_at < ?
-    `, [cutoff]);
-
-    const count = countResult.length > 0 ? (countResult[0].values[0][0] as number) : 0;
-
-    if (count > 0) {
-      // Delete old completed jobs
-      this.db.run(`
-        DELETE FROM jobs 
+      const countResult = this.db!.exec(`
+        SELECT COUNT(*) FROM jobs 
         WHERE status IN ('completed', 'dead_letter', 'cancelled')
           AND updated_at < ?
       `, [cutoff]);
 
-      // Delete orphaned history
-      this.db.run(`
-        DELETE FROM job_history 
-        WHERE job_id NOT IN (SELECT id FROM jobs)
-      `);
+      const count = countResult.length > 0 ? (countResult[0].values[0][0] as number) : 0;
 
-      this.markDirty();
-      this.logger.info(`Cleaned up ${count} old jobs`);
-    }
+      if (count > 0) {
+        this.db!.run(`
+          DELETE FROM jobs 
+          WHERE status IN ('completed', 'dead_letter', 'cancelled')
+            AND updated_at < ?
+        `, [cutoff]);
 
-    return count;
+        this.db!.run(`
+          DELETE FROM job_history 
+          WHERE job_id NOT IN (SELECT id FROM jobs)
+        `);
+
+        this.markDirty();
+        this.logger.info(`Cleaned up ${count} old jobs`);
+      }
+
+      return count;
+    });
   }
 
   /**

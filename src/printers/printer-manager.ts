@@ -391,8 +391,22 @@ export class PrinterManager extends EventEmitter {
       
       for (const [id, status] of statuses) {
         const adapter = this.printers.get(id);
-        if (adapter && status !== adapter.state.status) {
+        if (!adapter) continue;
+        
+        if (status !== adapter.state.status) {
           this.emit('printerStatusChange', { id, status });
+        }
+
+        // Auto-reconnect offline/error printers that are enabled
+        const config = this.configs.get(id);
+        if (config?.enabled && (status === PrinterStatus.OFFLINE || status === PrinterStatus.ERROR)) {
+          this.logger.info(`Printer ${id} is ${status}, attempting auto-reconnect...`);
+          try {
+            await adapter.connect();
+            this.logger.info(`Printer ${id} reconnected successfully`);
+          } catch (err) {
+            this.logger.warn(`Printer ${id} reconnect failed: ${(err as Error).message}`);
+          }
         }
       }
     }, this.healthCheckInterval);

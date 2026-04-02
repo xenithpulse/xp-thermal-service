@@ -368,28 +368,37 @@ export class ApiServer {
   }
 
   private handleHealth(_req: Request, res: Response): void {
-    const printerSummary = this.printerManager.getSummary();
-    const queueStats = this.queue.getStats();
+    try {
+      const printerSummary = this.printerManager.getSummary();
+      const queueStats = this.queue.getStats();
 
-    // Service is always healthy once it's listening.
-    // Only report 'initializing' while actively scanning USB ports for printers.
-    // Printers being offline is normal and does NOT make the service unhealthy.
-    const status: 'healthy' | 'initializing' =
-      printerSummary.initializing ? 'initializing' : 'healthy';
+      const status: 'healthy' | 'initializing' =
+        printerSummary.initializing ? 'initializing' : 'healthy';
 
-    const response: HealthResponse = {
-      status,
-      uptime: Date.now() - this.startTime,
-      version: '1.0.0',
-      printers: printerSummary,
-      queue: {
-        pending: queueStats.pending,
-        processing: queueStats.processing,
-        failed: queueStats.failed
-      }
-    };
+      const response: HealthResponse = {
+        status,
+        uptime: Date.now() - this.startTime,
+        version: '1.0.0',
+        printers: printerSummary,
+        queue: {
+          pending: queueStats.pending,
+          processing: queueStats.processing,
+          failed: queueStats.failed
+        }
+      };
 
-    res.status(200).json(response);
+      res.status(200).json(response);
+    } catch (error) {
+      // Native module crash (e.g. better-sqlite3 "memory access out of bounds")
+      // Return degraded status so the watchdog can detect and restart the process
+      this.logger.error({ error: error instanceof Error ? error.message : error }, 'Health check internal error');
+      res.status(503).json({
+        status: 'degraded',
+        uptime: Date.now() - this.startTime,
+        version: '1.0.0',
+        error: error instanceof Error ? error.message : 'Internal health check failure'
+      });
+    }
   }
 
   /**

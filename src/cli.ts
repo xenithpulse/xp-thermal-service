@@ -223,8 +223,8 @@ program
     }
 
     // Check if running by trying to connect to the API
+    const activePort = getActivePort();
     try {
-      const activePort = getActivePort();
       const response = await fetch(`http://127.0.0.1:${activePort}/api/health`, {
         signal: AbortSignal.timeout(2000)
       });
@@ -232,14 +232,17 @@ program
       if (response.ok) {
         const data = await response.json() as HealthResponse;
         console.log('Status: RUNNING');
+        console.log(`Port: ${activePort}`);
+        console.log(`URL: http://127.0.0.1:${activePort}`);
+        console.log(`Dashboard: http://127.0.0.1:${activePort}/dashboard`);
         console.log(`Uptime: ${formatUptime(data.uptime)}`);
         console.log(`Printers: ${data.printers.online}/${data.printers.total} online`);
         console.log(`Queue: ${data.queue.pending} pending, ${data.queue.processing} processing`);
       } else {
-        console.log('Status: INSTALLED (not responding)');
+        console.log(`Status: INSTALLED (not responding on port ${activePort})`);
       }
     } catch {
-      console.log('Status: INSTALLED (not running or not responding)');
+      console.log(`Status: INSTALLED (not running or not responding on port ${activePort})`);
     }
   });
 

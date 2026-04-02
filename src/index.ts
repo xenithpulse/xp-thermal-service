@@ -328,6 +328,13 @@ export class ThermalPrintService extends EventEmitter {
   getJobQueue(): JobQueue {
     return this.jobQueue;
   }
+
+  /**
+   * Get the port the API server is actually listening on
+   */
+  getActivePort(): number {
+    return this.apiServer?.getActivePort() ?? this.config.getServerConfig().port;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +351,10 @@ const PRODUCTION_CONFIG = {
   heartbeatIntervalMs: 60000, // 1 minute
   // GC interval hint (V8 will decide)
   gcHintIntervalMs: 300000, // 5 minutes
+  // Self-health check interval
+  selfHealthCheckIntervalMs: 30000, // 30 seconds
+  // Number of consecutive health failures before auto-restart
+  maxHealthFailures: 3,
 };
 
 /**
@@ -474,10 +485,30 @@ For more information, see the documentation.
   // ─────────────────────────────────────────────────────────────────────────
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let gcHintTimer: NodeJS.Timeout | null = null;
+  let healthWatchdogTimer: NodeJS.Timeout | null = null;
+  let consecutiveHealthFailures = 0;
+  let lastHeartbeatTime = Date.now();
 
   const startHealthMonitoring = () => {
-    // Heartbeat logging
+    // Heartbeat logging + sleep/wake detection
     heartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      const elapsed = now - lastHeartbeatTime;
+      lastHeartbeatTime = now;
+
+      // Sleep/wake detection: if elapsed >> expected interval, system likely slept
+      if (elapsed > PRODUCTION_CONFIG.heartbeatIntervalMs * 3) {
+        const sleepDurationSec = Math.round(elapsed / 1000);
+        console.warn(`[WAKE] System appears to have slept for ~${sleepDurationSec}s. Triggering proactive recovery...`);
+
+        // Reconnect all printers (they may have lost connection during sleep)
+        if (service.getPrinterManager()) {
+          service.getPrinterManager().connectAll().catch(err => {
+            console.error(`[WAKE] Printer reconnect failed: ${err}`);
+          });
+        }
+      }
+
       const mem = process.memoryUsage();
       const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
       const rssMB = Math.round(mem.rss / 1024 / 1024);
@@ -495,6 +526,39 @@ For more information, see the documentation.
       const status = service.getStatus();
       console.log(`[HEARTBEAT] Uptime: ${Math.round(status.uptime)}s | Heap: ${heapUsedMB}MB | RSS: ${rssMB}MB | Printers: ${status.printers.online}/${status.printers.total} | Queue: ${status.queue.pending} pending`);
     }, PRODUCTION_CONFIG.heartbeatIntervalMs);
+
+    // Self-health watchdog: hit own /health endpoint to detect native module crashes
+    const activePort = service.getActivePort();
+    healthWatchdogTimer = setInterval(async () => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(`http://127.0.0.1:${activePort}/health`, {
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+
+        if (res.ok) {
+          if (consecutiveHealthFailures > 0) {
+            console.log(`[WATCHDOG] Health recovered after ${consecutiveHealthFailures} failure(s)`);
+          }
+          consecutiveHealthFailures = 0;
+        } else {
+          const body = await res.text().catch(() => '');
+          consecutiveHealthFailures++;
+          console.error(`[WATCHDOG] Health check failed (${consecutiveHealthFailures}/${PRODUCTION_CONFIG.maxHealthFailures}): HTTP ${res.status} - ${body}`);
+        }
+      } catch (err) {
+        consecutiveHealthFailures++;
+        console.error(`[WATCHDOG] Health check error (${consecutiveHealthFailures}/${PRODUCTION_CONFIG.maxHealthFailures}): ${err instanceof Error ? err.message : err}`);
+      }
+
+      if (consecutiveHealthFailures >= PRODUCTION_CONFIG.maxHealthFailures) {
+        console.error(`[WATCHDOG] ${consecutiveHealthFailures} consecutive health failures. Restarting process to recover...`);
+        // Exit with code 1 — node-windows will auto-restart the service
+        process.exit(1);
+      }
+    }, PRODUCTION_CONFIG.selfHealthCheckIntervalMs);
 
     // GC hints (if manual GC is exposed via --expose-gc)
     if (typeof global.gc === 'function') {
@@ -516,6 +580,10 @@ For more information, see the documentation.
     if (gcHintTimer) {
       clearInterval(gcHintTimer);
       gcHintTimer = null;
+    }
+    if (healthWatchdogTimer) {
+      clearInterval(healthWatchdogTimer);
+      healthWatchdogTimer = null;
     }
   };
 
