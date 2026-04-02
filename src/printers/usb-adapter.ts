@@ -83,6 +83,19 @@ export class USBPrinterAdapter extends BasePrinterAdapter {
         throw new Error(`Printer not found: ${this.printerName}`);
       }
 
+      // Check actual Windows printer status before declaring online
+      const status = await this.getPrinterStatus();
+      if (status === PrinterStatus.OFFLINE || status === PrinterStatus.ERROR) {
+        this.updateState({
+          isConnected: false,
+          status,
+          lastSeen: Date.now(),
+          lastError: `Printer exists but Windows reports status: ${status}`
+        });
+        this.reconnectAttempts = 0;
+        return;
+      }
+
       this.handleConnectionSuccess();
     } catch (error) {
       this.handleConnectionError(error as Error);
@@ -369,12 +382,21 @@ public class RawPrinterHelper
     try {
       const exists = await this.printerExists();
       if (!exists) {
+        this.updateState({ status: PrinterStatus.OFFLINE, isConnected: false });
         return PrinterStatus.OFFLINE;
       }
 
-      // Check printer status via PowerShell
-      return await this.getPrinterStatus();
+      // Check printer status via PowerShell/WMI (includes WorkOffline check)
+      const status = await this.getPrinterStatus();
+      const isOnline = status === PrinterStatus.ONLINE || status === PrinterStatus.BUSY;
+      this.updateState({
+        status,
+        isConnected: isOnline,
+        lastSeen: isOnline ? Date.now() : this._state.lastSeen
+      });
+      return status;
     } catch {
+      this.updateState({ status: PrinterStatus.ERROR, isConnected: false });
       return PrinterStatus.ERROR;
     }
   }
@@ -388,16 +410,31 @@ public class RawPrinterHelper
         '-Command',
         `
         $name = $env:XP_PRINTER_NAME
+        # Use WMI as primary — it exposes WorkOffline which Get-Printer does not.
+        # Get-Printer.PrinterStatus stays "Normal" even when USB device is unplugged.
         try {
-          $printer = Get-Printer -Name $name -ErrorAction Stop
-          Write-Output $printer.PrinterStatus
-        } catch {
-          try {
-            $p = Get-WmiObject -Class Win32_Printer | Where-Object { $_.Name -eq $name }
-            if ($p) { Write-Output $p.PrinterStatus } else { Write-Output 'NotFound' }
-          } catch {
-            Write-Output 'Error'
+          $p = Get-WmiObject -Class Win32_Printer | Where-Object { $_.Name -eq $name }
+          if (-not $p) {
+            Write-Output 'NotFound'
+            return
           }
+          # WorkOffline is the reliable flag for physical disconnection
+          if ($p.WorkOffline) {
+            Write-Output 'WorkOffline'
+            return
+          }
+          # PrinterStatus: 3=Idle, 1=Other, 2=Unknown, 4=Printing, 5=Warmup
+          # PrinterState flags: 0=Ready, 2=Error, 8=PaperJam, 16=PaperOut, 128=Offline, 1024=Busy
+          $state = [int]$p.PrinterState
+          if ($state -band 128) { Write-Output 'Offline' }
+          elseif ($state -band 2) { Write-Output 'Error' }
+          elseif ($state -band 16) { Write-Output 'PaperOut' }
+          elseif ($state -band 8) { Write-Output 'PaperJam' }
+          elseif ($state -band 1024) { Write-Output 'Busy' }
+          elseif ($p.PrinterStatus -eq 3 -or $p.PrinterStatus -eq 4) { Write-Output 'Normal' }
+          else { Write-Output $p.PrinterStatus }
+        } catch {
+          Write-Output 'Error'
         }
         `
       ], {
@@ -415,14 +452,19 @@ public class RawPrinterHelper
 
         if (status === 'notfound') {
           resolve(PrinterStatus.OFFLINE);
-        } else if (status === 'normal' || status === '0') {
+        } else if (status === 'workoffline' || status === 'offline') {
+          resolve(PrinterStatus.OFFLINE);
+        } else if (status === 'normal') {
           resolve(PrinterStatus.ONLINE);
-        } else if (status.includes('error') || status.includes('offline')) {
+        } else if (status === 'error' || status === 'paperjam') {
           resolve(PrinterStatus.ERROR);
-        } else if (status.includes('busy') || status.includes('printing')) {
+        } else if (status === 'busy' || status === 'printing' || status === '4') {
           resolve(PrinterStatus.BUSY);
+        } else if (status === 'paperout') {
+          resolve(PrinterStatus.PAPER_OUT);
         } else {
-          resolve(PrinterStatus.ONLINE);
+          // Unknown — don't assume online
+          resolve(PrinterStatus.ERROR);
         }
       });
 

@@ -17,6 +17,7 @@ import { PrinterManager } from '../printers/printer-manager';
 import { JobProcessor } from '../queue/processor';
 import { ConfigManager } from '../utils/config';
 import { USBPrinterAdapter } from '../printers/usb-adapter';
+import { Commands } from '../escpos/builder';
 import {
   PrintRequest,
   PrintResponse,
@@ -38,7 +39,8 @@ const PrintRequestSchema = z.object({
   templateType: z.nativeEnum(TemplateType),
   payload: z.record(z.unknown()),
   priority: z.nativeEnum(JobPriority).optional(),
-  copies: z.number().min(1).max(10).optional()
+  copies: z.number().min(1).max(10).optional(),
+  metadata: z.record(z.unknown()).optional()
 });
 
 export interface ApiServerConfig {
@@ -339,6 +341,7 @@ export class ApiServer {
     this.app.get('/api/printers/:printerId/status', this.handleGetPrinterStatus.bind(this));
     this.app.post('/api/printers/:printerId/test', this.handleTestPrinter.bind(this));
     this.app.post('/api/printers/:printerId/reconnect', this.handleReconnectPrinter.bind(this));
+    this.app.post('/api/printers/:printerId/cash-drawer', this.handleOpenCashDrawer.bind(this));
 
     // Queue management
     this.app.get('/api/queue/stats', this.handleQueueStats.bind(this));
@@ -735,6 +738,60 @@ export class ApiServer {
     }
   }
 
+  private async handleOpenCashDrawer(req: Request, res: Response): Promise<void> {
+    try {
+      let { printerId } = req.params;
+
+      // Resolve 'default' to the actual default printer
+      if (printerId === 'default') {
+        const defaultPrinter = this.printerManager.getDefaultPrinter();
+        if (!defaultPrinter) {
+          throw new PrintServiceError(
+            'No default printer configured',
+            ErrorCodes.PRINTER_NOT_FOUND,
+            404
+          );
+        }
+        printerId = defaultPrinter.id;
+      }
+
+      const printer = this.printerManager.getPrinter(printerId);
+
+      if (!printer) {
+        throw new PrintServiceError(
+          `Printer not found: ${printerId}`,
+          ErrorCodes.PRINTER_NOT_FOUND,
+          404
+        );
+      }
+
+      const capabilities = printer.getCapabilities();
+      if (!capabilities.supportsCashDrawer) {
+        res.status(400).json({
+          success: false,
+          error: 'Cash drawer not supported',
+          message: `Printer "${printerId}" does not have cash drawer support enabled in its configuration`
+        });
+        return;
+      }
+
+      const pin = req.body?.pin === 5 ? 5 : 2;
+      const drawerCmd = Buffer.from(
+        pin === 5 ? Commands.CASH_DRAWER_PIN5 : Commands.CASH_DRAWER_PIN2
+      );
+      const result = await this.printerManager.print(printerId, drawerCmd);
+
+      res.json({
+        success: result.success,
+        message: result.success
+          ? `Cash drawer opened on ${printerId} (pin ${pin})`
+          : `Failed to open cash drawer: ${result.error}`
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
   // ── System Info Handlers ──
 
   private handleSystemInfo(_req: Request, res: Response): void {
@@ -866,13 +923,24 @@ export class ApiServer {
     }
   }
 
-  private handleAddPrinter(req: Request, res: Response): void {
+  private async handleAddPrinter(req: Request, res: Response): Promise<void> {
     try {
       const cm = this.config.configManager;
       cm.addPrinter(req.body);
+
+      // Live-register the printer in the manager and connect it
+      try {
+        this.printerManager.registerPrinter(req.body);
+        if (req.body.enabled !== false) {
+          await this.printerManager.connectPrinter(req.body.id);
+        }
+      } catch (connectErr) {
+        this.logger.warn(`Printer added but failed to connect: ${(connectErr as Error).message}`);
+      }
+
       res.status(201).json({
         success: true,
-        message: 'Printer added successfully. Restart the service to activate the new printer.',
+        message: 'Printer added and activated.',
         printers: cm.getPrinters()
       });
     } catch (error) {
@@ -880,14 +948,29 @@ export class ApiServer {
     }
   }
 
-  private handleUpdatePrinterConfig(req: Request, res: Response): void {
+  private async handleUpdatePrinterConfig(req: Request, res: Response): Promise<void> {
     try {
       const { printerId } = req.params;
       const cm = this.config.configManager;
       cm.updatePrinter(printerId, req.body);
+
+      // Live-update: unregister old adapter, register with new config, reconnect
+      try {
+        await this.printerManager.unregisterPrinter(printerId);
+        const updatedConfig = cm.getPrinter(printerId);
+        if (updatedConfig) {
+          this.printerManager.registerPrinter(updatedConfig);
+          if (updatedConfig.enabled !== false) {
+            await this.printerManager.connectPrinter(printerId);
+          }
+        }
+      } catch (reconnErr) {
+        this.logger.warn(`Printer config updated but reconnect failed: ${(reconnErr as Error).message}`);
+      }
+
       res.json({
         success: true,
-        message: 'Printer configuration updated. Restart the service for changes to take effect.',
+        message: 'Printer configuration updated and applied.',
         printer: cm.getPrinter(printerId)
       });
     } catch (error) {
@@ -895,14 +978,22 @@ export class ApiServer {
     }
   }
 
-  private handleDeletePrinterConfig(req: Request, res: Response): void {
+  private async handleDeletePrinterConfig(req: Request, res: Response): Promise<void> {
     try {
       const { printerId } = req.params;
       const cm = this.config.configManager;
+
+      // Live-unregister: disconnect and remove from manager
+      try {
+        await this.printerManager.unregisterPrinter(printerId);
+      } catch (disconnErr) {
+        this.logger.warn(`Error unregistering printer: ${(disconnErr as Error).message}`);
+      }
+
       cm.removePrinter(printerId);
       res.json({
         success: true,
-        message: 'Printer removed successfully.',
+        message: 'Printer removed.',
         printers: cm.getPrinters()
       });
     } catch (error) {

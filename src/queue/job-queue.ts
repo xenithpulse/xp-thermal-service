@@ -89,7 +89,8 @@ export class JobQueue extends EventEmitter {
       templateType: request.templateType,
       payload: request.payload,
       priority: request.priority,
-      maxAttempts: this.config.maxRetries
+      maxAttempts: this.config.maxRetries,
+      metadata: request.metadata
     });
   }
 

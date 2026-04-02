@@ -402,21 +402,29 @@
 
       <!-- ═══ PRINTERS PAGE ═══ -->
       <div class="page" id="page-printers">
+        <div class="stat-grid" id="printerStats"></div>
         <div class="card">
           <div class="card-header">
             <h3>Configured Printers</h3>
-            <button class="btn btn-primary btn-sm" data-action="openAddPrinter">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Add Printer
-            </button>
+            <div class="actions">
+              <button class="btn btn-outline btn-sm" data-action="refreshPrinters">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                Refresh
+              </button>
+              <button class="btn btn-primary btn-sm" data-action="openAddPrinter">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Add Printer
+              </button>
+            </div>
           </div>
           <div class="card-body flush">
             <table>
-              <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Target</th><th>Status</th><th>Actions</th></tr></thead>
+              <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Target</th><th>Status</th><th>Jobs</th><th>Last Seen</th><th>Actions</th></tr></thead>
               <tbody id="printerTable"></tbody>
             </table>
           </div>
         </div>
+        <div id="printerDetailCards"></div>
       </div>
 
       <!-- ═══ JOBS PAGE ═══ -->
@@ -764,7 +772,8 @@ document.addEventListener('DOMContentLoaded', function() {
       const actions = {
         openAddPrinter, closeModal, savePrinter, loadJobs,
         pauseQueue, resumeQueue, clearFailedJobs,
-        saveServerConfig, saveSecurityConfig
+        saveServerConfig, saveSecurityConfig,
+        refreshPrinters: loadPrinters
       };
       const fn = actions[actionBtn.dataset.action];
       if (fn) fn();
@@ -918,27 +927,118 @@ async function retryJob(id) {
 }
 
 // ── Printers ──
+function formatLastSeen(ts) {
+  if (!ts) return 'Never';
+  const d = new Date(ts);
+  const now = Date.now();
+  const diffMs = now - ts;
+  if (diffMs < 60000) return 'Just now';
+  if (diffMs < 3600000) return Math.floor(diffMs / 60000) + 'm ago';
+  if (diffMs < 86400000) return Math.floor(diffMs / 3600000) + 'h ago';
+  return d.toLocaleDateString();
+}
+
+function renderPrinterDetailCards(printers) {
+  const container = document.getElementById('printerDetailCards');
+  if (!printers || printers.length === 0) { container.innerHTML = ''; return; }
+  container.innerHTML = printers.map(p => {
+    const status = p.state?.status || 'unknown';
+    const statusCls = status === 'online' ? 'online' : status === 'offline' ? 'offline' : 'error';
+    const caps = p.capabilities || {};
+    const capList = [
+      caps.supportsBold && 'Bold',
+      caps.supportsUnderline && 'Underline',
+      caps.supportsBarcode && 'Barcode',
+      caps.supportsQRCode && 'QR Code',
+      caps.supportsImage && 'Image',
+      caps.supportsCut && 'Auto-Cut',
+      caps.supportsPartialCut && 'Partial Cut',
+      caps.supportsCashDrawer && 'Cash Drawer',
+      caps.supportsDensity && 'Density',
+    ].filter(Boolean);
+    return `<div class="card" style="margin-top:16px">
+      <div class="card-header">
+        <div style="display:flex;align-items:center;gap:10px">
+          <h3>${esc(p.name)}</h3>
+          <span class="badge ${statusCls}">${esc(status)}</span>
+          ${p.isDefault ? '<span style="font-size:10px;background:var(--accent-bg);color:var(--accent-light);padding:2px 8px;border-radius:10px;font-weight:600">DEFAULT</span>' : ''}
+          ${p.enabled ? '' : '<span style="font-size:10px;background:var(--red-bg);color:var(--red);padding:2px 8px;border-radius:10px;font-weight:600">DISABLED</span>'}
+        </div>
+        <div class="actions">
+          <button class="btn btn-outline btn-sm" onclick="testPrinter('${esc(p.id)}')">Test</button>
+          <button class="btn btn-outline btn-sm" onclick="reconnectPrinter('${esc(p.id)}')">Reconnect</button>
+          <button class="btn btn-outline btn-sm" onclick="editPrinter('${esc(p.id)}')">Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="deletePrinter('${esc(p.id)}')">Delete</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="grid-2">
+          <div>
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);margin-bottom:8px;font-weight:700">Configuration</div>
+            <table style="font-size:12px">
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">ID</td><td style="font-family:'SF Mono',Monaco,monospace;color:var(--accent-light);border:none;padding:4px 0">${esc(p.id)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Type</td><td style="border:none;padding:4px 0">${esc(p.type)}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Target</td><td style="font-family:'SF Mono',Monaco,monospace;border:none;padding:4px 0">${p.type === 'network' ? esc((p.host || '') + ':' + (p.port || 9100)) : esc(p.printerName || '-')}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Paper Width</td><td style="border:none;padding:4px 0">${caps.maxWidth || '-'} chars</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Timeout</td><td style="border:none;padding:4px 0">${p.timeout ? (p.timeout / 1000) + 's' : '-'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Max Retries</td><td style="border:none;padding:4px 0">${p.maxRetries ?? '-'}</td></tr>
+            </table>
+          </div>
+          <div>
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);margin-bottom:8px;font-weight:700">State</div>
+            <table style="font-size:12px">
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Connected</td><td style="border:none;padding:4px 0">${p.state?.isConnected ? '<span style="color:var(--green)">Yes</span>' : '<span style="color:var(--red)">No</span>'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Jobs Printed</td><td style="border:none;padding:4px 0;font-weight:700">${p.state?.totalJobsPrinted ?? 0}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Failures</td><td style="border:none;padding:4px 0">${(p.state?.consecutiveFailures || 0) > 0 ? '<span style="color:var(--red)">' + p.state.consecutiveFailures + '</span>' : '<span style="color:var(--green)">0</span>'}</td></tr>
+              <tr><td style="color:var(--text-dim);padding:4px 12px 4px 0;border:none">Last Seen</td><td style="border:none;padding:4px 0">${formatLastSeen(p.state?.lastSeen)}</td></tr>
+            </table>
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-muted);margin:14px 0 8px;font-weight:700">Capabilities</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px">${capList.map(c => '<span style="font-size:10px;background:var(--bg-hover);color:var(--text-dim);padding:2px 8px;border-radius:4px">' + c + '</span>').join('')}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 async function loadPrinters() {
   try {
     const d = await api('GET', '/api/printers');
-    // Full table
+    const printers = d.printers || [];
     const tbody = document.getElementById('printerTable');
-    if (!d.printers || d.printers.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><p>No printers configured</p></div></td></tr>';
+    if (printers.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8"><div class="empty-state"><p>No printers configured</p></div></td></tr>';
       document.getElementById('overviewPrinterTable').innerHTML = '<tr><td colspan="3"><div class="empty-state"><p>No printers</p></div></td></tr>';
+      document.getElementById('printerStats').innerHTML = '';
+      document.getElementById('printerDetailCards').innerHTML = '';
       return;
     }
-    tbody.innerHTML = d.printers.map(p => {
-      const target = p.config.type === 'network' 
-        ? `${esc(p.config.host || '')}:${esc(p.config.port || 9100)}` 
-        : esc(p.config.printerName || '-');
-      const statusCls = p.status === 'online' ? 'online' : p.status === 'offline' ? 'offline' : 'error';
+
+    // Printer stats
+    const online = printers.filter(p => p.state?.status === 'online').length;
+    const totalJobs = printers.reduce((sum, p) => sum + (p.state?.totalJobsPrinted || 0), 0);
+    document.getElementById('printerStats').innerHTML = `
+      <div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></div><div class="stat-info"><div class="stat-val">${printers.length}</div><div class="stat-lbl">Total Printers</div></div></div>
+      <div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div><div class="stat-info"><div class="stat-val">${online}</div><div class="stat-lbl">Online</div></div></div>
+      <div class="stat-card"><div class="stat-icon" style="background:var(--red-bg);color:var(--red)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div><div class="stat-info"><div class="stat-val">${printers.length - online}</div><div class="stat-lbl">Offline</div></div></div>
+      <div class="stat-card"><div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div><div class="stat-info"><div class="stat-val">${totalJobs}</div><div class="stat-lbl">Total Jobs Printed</div></div></div>
+    `;
+
+    // Full table
+    tbody.innerHTML = printers.map(p => {
+      const target = p.type === 'network' 
+        ? `${esc(p.host || '')}:${esc(p.port || 9100)}` 
+        : esc(p.printerName || '-');
+      const status = p.state?.status || 'unknown';
+      const statusCls = status === 'online' ? 'online' : status === 'offline' ? 'offline' : 'error';
       return `<tr>
-        <td><strong style="color:var(--accent-light)">${esc(p.id)}</strong></td>
-        <td>${esc(p.config.name)}</td>
-        <td style="color:var(--text-dim)">${esc(p.config.type)}</td>
+        <td><strong style="color:var(--accent-light)">${esc(p.id)}</strong>${p.isDefault ? ' <span style="font-size:9px;background:var(--accent-bg);color:var(--accent-light);padding:1px 6px;border-radius:8px">DEFAULT</span>' : ''}</td>
+        <td>${esc(p.name)}</td>
+        <td style="color:var(--text-dim)">${esc(p.type)}</td>
         <td style="font-size:12px;font-family:'SF Mono',Monaco,monospace;color:var(--text-dim)">${target}</td>
-        <td><span class="badge ${statusCls}">${esc(p.status)}</span></td>
+        <td><span class="badge ${statusCls}">${esc(status)}</span></td>
+        <td style="font-weight:600">${p.state?.totalJobsPrinted ?? 0}</td>
+        <td style="font-size:11px;color:var(--text-dim)">${formatLastSeen(p.state?.lastSeen)}</td>
         <td class="actions">
           <button class="btn btn-outline btn-sm" onclick="testPrinter('${esc(p.id)}')">Test</button>
           <button class="btn btn-outline btn-sm" onclick="reconnectPrinter('${esc(p.id)}')">Reconnect</button>
@@ -949,14 +1049,18 @@ async function loadPrinters() {
     }).join('');
 
     // Overview mini table
-    document.getElementById('overviewPrinterTable').innerHTML = d.printers.slice(0, 5).map(p => {
-      const statusCls = p.status === 'online' ? 'online' : p.status === 'offline' ? 'offline' : 'error';
+    document.getElementById('overviewPrinterTable').innerHTML = printers.slice(0, 5).map(p => {
+      const status = p.state?.status || 'unknown';
+      const statusCls = status === 'online' ? 'online' : status === 'offline' ? 'offline' : 'error';
       return `<tr>
-        <td>${esc(p.config.name)}</td>
-        <td style="color:var(--text-dim)">${esc(p.config.type)}</td>
-        <td><span class="badge ${statusCls}">${esc(p.status)}</span></td>
+        <td>${esc(p.name)}</td>
+        <td style="color:var(--text-dim)">${esc(p.type)}</td>
+        <td><span class="badge ${statusCls}">${esc(status)}</span></td>
       </tr>`;
     }).join('');
+
+    // Detail cards
+    renderPrinterDetailCards(printers);
   } catch {}
 }
 
@@ -978,11 +1082,15 @@ async function reconnectPrinter(id) {
 async function deletePrinter(id) {
   if (!confirm(`Delete printer "${id}"? This will remove it from config.`)) return;
   try {
-    await api('DELETE', `/api/config/printers/${id}`);
-    toast('Printer removed');
+    const d = await api('DELETE', `/api/config/printers/${id}`);
+    if (d.success === false) {
+      toast(d.message || d.error || 'Failed to delete', 'error');
+      return;
+    }
+    toast(d.message || 'Printer removed');
     loadPrinters();
     loadHealth();
-  } catch (e) { toast('Failed to delete', 'error'); }
+  } catch (e) { toast('Failed to delete: ' + (e.message || ''), 'error'); }
 }
 
 // ── Config ──
@@ -1154,9 +1262,17 @@ async function savePrinter() {
   try {
     if (editId) {
       const d = await api('PUT', `/api/config/printers/${editId}`, body);
+      if (d.success === false) {
+        toast(d.message || d.error || 'Update failed', 'error');
+        return;
+      }
       toast(d.message || 'Printer updated');
     } else {
       const d = await api('POST', '/api/config/printers', body);
+      if (d.success === false) {
+        toast(d.message || d.error || 'Add failed', 'error');
+        return;
+      }
       toast(d.message || 'Printer added');
     }
     closeModal();
@@ -1164,7 +1280,7 @@ async function savePrinter() {
     loadConfig();
     loadHealth();
   } catch (e) {
-    toast('Failed to save printer', 'error');
+    toast('Failed to save printer: ' + (e.message || ''), 'error');
   }
 }
 

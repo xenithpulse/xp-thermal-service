@@ -312,6 +312,7 @@ export interface PrintRequest {
   payload: Record<string, unknown>;
   priority?: JobPriority;
   copies?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface PrintResponse {

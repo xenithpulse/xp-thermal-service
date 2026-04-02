@@ -7,6 +7,7 @@ import { EventEmitter } from 'events';
 import { JobQueue } from './job-queue';
 import { PrinterManager } from '../printers/printer-manager';
 import { TemplateEngine } from '../templates/engine';
+import { Commands } from '../escpos/builder';
 import {
   PrintJob,
   JobStatus,
@@ -210,6 +211,20 @@ export class JobProcessor extends EventEmitter {
 
       if (!printResult.success) {
         throw new Error(printResult.error || 'Print failed');
+      }
+
+      // Open cash drawer if requested via metadata AND supported by printer
+      if (job.metadata?.openCashDrawer) {
+        const capabilities = printer.getCapabilities();
+        if (capabilities.supportsCashDrawer) {
+          this.logger.debug(`Opening cash drawer for printer ${job.printerId}`);
+          const drawerCmd = Buffer.from(Commands.CASH_DRAWER_PIN2);
+          await this.printerManager.print(job.printerId, drawerCmd).catch(err => {
+            this.logger.warn(`Cash drawer open failed for ${job.printerId}: ${(err as Error).message}`);
+          });
+        } else {
+          this.logger.debug(`Skipping cash drawer for ${job.printerId} — not supported by config`);
+        }
       }
 
       // Mark as completed
