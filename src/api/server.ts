@@ -294,7 +294,16 @@ export class ApiServer {
       return next();
     }
 
-    const key = req.ip || 'unknown';
+    // Skip rate limiting for loopback (same-machine POS apps).
+    // Restaurant POS terminals on the same Windows host can burst-print during
+    // peak service; throttling them would queue tickets and slow table turn-over.
+    // The host validation middleware already restricts non-loopback access.
+    const remoteIp = req.ip || req.socket.remoteAddress || '';
+    if (remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1') {
+      return next();
+    }
+
+    const key = remoteIp || 'unknown';
 
     try {
       // Check burst limit first (prevents rapid-fire requests)
@@ -352,6 +361,9 @@ export class ApiServer {
     this.app.get('/api/metrics', this.handleMetrics.bind(this));
     this.app.get('/api/system/info', this.handleSystemInfo.bind(this));
     this.app.get('/api/system/connections', this.handleConnectionStats.bind(this));
+
+    // Service control (loopback-only restart trigger for POS app)
+    this.app.post('/api/service/restart', this.handleServiceRestart.bind(this));
 
     // Configuration management
     this.app.get('/api/config', this.handleGetConfig.bind(this));
@@ -832,6 +844,43 @@ export class ApiServer {
     } catch (error) {
       this.handleError(error, res);
     }
+  }
+
+  /**
+   * Trigger a graceful process restart. Loopback-only.
+   * The Windows service wrapper (node-windows) will auto-restart the process
+   * on a non-zero exit code.
+   *
+   * Used by:
+   *   - POS app (E:\xp-pos\pos_modules\orders\printing-facility) for forced recovery
+   *   - External watchdog scripts (scripts\trigger-restart.ps1)
+   */
+  private handleServiceRestart(req: Request, res: Response): void {
+    const remoteIp = req.ip || req.socket.remoteAddress || '';
+    const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteIp);
+
+    if (!isLoopback) {
+      this.logger.warn({ remoteIp }, 'Blocked non-loopback request to /api/service/restart');
+      res.status(403).json({ error: 'Forbidden', message: 'Only available from localhost' });
+      return;
+    }
+
+    this.logger.warn({ remoteIp, ua: req.get('user-agent') }, 'Service restart requested via API');
+
+    // Acknowledge immediately, then exit so node-windows respawns us.
+    res.status(202).json({
+      success: true,
+      message: 'Service restart initiated. Process will respawn within ~5s.',
+      pid: process.pid
+    });
+
+    // Give the response time to flush, then exit with code 1 so the
+    // node-windows wrapper performs an automatic restart.
+    setTimeout(() => {
+      // eslint-disable-next-line no-console
+      console.warn('[API] Restart requested — exiting process for wrapper respawn');
+      process.exit(1);
+    }, 500);
   }
 
   private handleMetrics(_req: Request, res: Response): void {

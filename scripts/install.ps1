@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # XP Thermal Service - Production-Grade Installation Script
 # Enterprise installer with robust error recovery
 # ============================================================
@@ -35,6 +35,7 @@ $LegacyServiceNames = @(
 )
 
 $WatchdogTaskName = "XPThermalServiceWatchdog"
+$HeartbeatTaskName = "XPThermalServiceHeartbeat"
 
 # ============================================================
 # UI HELPERS
@@ -301,7 +302,7 @@ function Write-SuccessBox {
     Write-Host "  Crash recovery     " -NoNewline -ForegroundColor Gray
     Write-Host "Restarts after 5s / 10s / 30s" -ForegroundColor DarkGray
     Write-Host "  Watchdog           " -NoNewline -ForegroundColor Gray
-    Write-Host "Monitored every 5 minutes" -ForegroundColor DarkGray
+    Write-Host "Layer A: HTTP probe every 2 min  |  Layer B: trigger watcher every 10 min" -ForegroundColor DarkGray
     Write-Host "  Port fallback      " -NoNewline -ForegroundColor Gray
     Write-Host "Scans ${ServicePortStart}-${ServicePortEnd} automatically" -ForegroundColor DarkGray
     Write-Host ""
@@ -790,94 +791,474 @@ function Remove-FirewallRules {
 }
 
 # ============================================================
-# WATCHDOG (SCHEDULED TASK)
+# WATCHDOG (SCHEDULED TASKS)
+# ============================================================
+#
+# Two independent layers of ensurance keep the service alive across
+# multi-day idle periods:
+#
+#   Layer A — XPThermalServiceWatchdog (every 2 min)
+#     - HTTP-probes /health on the active port
+#     - If service is Stopped OR HTTP probe fails for 2 consecutive runs,
+#       performs a FULL restart (Stop-Service / kill daemon process / Start-Service).
+#     - This catches the "process is running but HTTP server is hung" failure mode
+#       that the old Status-only check missed.
+#
+#   Layer B — XPThermalServiceHeartbeat (every 10 min)
+#     - Independent of Layer A. Verifies Layer A's task itself is still scheduled.
+#     - Watches C:\ProgramData\XPThermalService\triggers\restart.trigger:
+#         the POS app (E:\xp-pos\pos_modules\orders\printing-facility) or any
+#         admin script can drop a file there to force a restart even when both
+#         the HTTP API and Layer A are dead.
+#     - Acts as a "watchdog of the watchdog".
+#
+# Both tasks: run as SYSTEM, persist on battery, restart on failure, never expire.
 # ============================================================
 
+# ─── Power management ───────────────────────────────────────────────
+# Restaurant POS terminals must NEVER sleep — a sleeping PC means orders
+# stop printing. We disable system sleep on AC power and add a power
+# request override so Windows treats the print service as a "system-required"
+# process that prevents idle sleep.
+function Set-PowerManagement {
+    try {
+        # Disable sleep / hibernate / display blanking on AC (laptop POS terminals
+        # often run unplugged temporarily during cleaning — leave battery defaults
+        # untouched to avoid surprise battery drain).
+        powercfg /change standby-timeout-ac 0      2>&1 | Out-Null
+        powercfg /change hibernate-timeout-ac 0    2>&1 | Out-Null
+        powercfg /change disk-timeout-ac 0         2>&1 | Out-Null
+        powercfg /hibernate off                    2>&1 | Out-Null
+        Write-OK "Sleep / hibernate disabled (AC power)"
+        Write-Log "Power: standby/hibernate/disk timeouts disabled on AC" "SUCCESS"
+    } catch {
+        Write-WARN "Could not adjust power plan: $_"
+    }
+
+    # Ensure the service is allowed to prevent system sleep
+    try {
+        powercfg /requestsoverride PROCESS "$ServiceName" SYSTEM DISPLAY AWAYMODE 2>&1 | Out-Null
+        powercfg /requestsoverride PROCESS "node.exe"     SYSTEM 2>&1 | Out-Null
+        Write-OK "Power request override granted"
+        Write-Log "Power request override granted to $ServiceName + node.exe" "SUCCESS"
+    } catch {
+        Write-Log "Could not set power request override (non-fatal): $_" "WARNING"
+    }
+}
+
+# ─── Icon assets, shortcuts, Add/Remove Programs entry ──────────────
+function Install-IconAndShortcuts {
+    param([int]$Port = 9100)
+    $sourceDir = Split-Path -Parent $PSScriptRoot
+    $icoSource = Join-Path $sourceDir "public\assets\icon.ico"
+    $pngSource = Join-Path $sourceDir "public\assets\icon.png"
+    $pngDest   = "$InstallPath\icon.png"
+    $icoDest   = "$InstallPath\icon.ico"
+
+    # 1. Copy native .ico (used for Add/Remove Programs, shortcuts, service icon)
+    if (Test-Path $icoSource) {
+        Copy-Item $icoSource $icoDest -Force -ErrorAction SilentlyContinue
+        Write-Dot "Brand icon (.ico) copied"
+        Write-Log "Icon copied from $icoSource to $icoDest"
+    } else {
+        Write-Log "icon.ico not found at $icoSource — skipping icon setup" "WARNING"
+        return
+    }
+
+    # 2. Copy PNG too (dashboard / web UI uses the PNG)
+    if (Test-Path $pngSource) {
+        Copy-Item $pngSource $pngDest -Force -ErrorAction SilentlyContinue
+        Write-Dot "Brand icon (.png) copied"
+    }
+
+    # 3. Resolve active port for shortcut URL — caller passes in the
+    #    port discovered during installation; fall back to active_port.txt.
+    $resolvedPort = $Port
+    $portFile = "$InstallPath\active_port.txt"
+    if ((-not $resolvedPort -or $resolvedPort -le 0) -and (Test-Path $portFile)) {
+        try { $resolvedPort = [int](Get-Content $portFile -Raw).Trim() } catch { $resolvedPort = 9100 }
+    }
+    if (-not $resolvedPort -or $resolvedPort -le 0) { $resolvedPort = 9100 }
+    $dashboardUrl = "http://127.0.0.1:$resolvedPort/dashboard"
+
+    # 4. Internet shortcut (.url) — picks up custom icon natively, opens in
+    #    default browser, works for both Start Menu and Desktop.
+    $urlContent = @"
+[InternetShortcut]
+URL=$dashboardUrl
+IconFile=$icoDest
+IconIndex=0
+"@
+
+    # Start Menu — visible to all users (machine-wide POS install)
+    $startMenuDir = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\XP Thermal Service"
+    try {
+        if (-not (Test-Path $startMenuDir)) {
+            New-Item -ItemType Directory -Path $startMenuDir -Force -ErrorAction Stop | Out-Null
+        }
+        Set-Content -Path "$startMenuDir\XP Thermal Dashboard.url" -Value $urlContent -Encoding ASCII -Force
+        Write-OK "Start Menu shortcut created"
+    } catch {
+        Write-Log "Start Menu shortcut failed: $_" "WARNING"
+    }
+
+    # Public Desktop — visible to all users
+    $publicDesktop = "$env:PUBLIC\Desktop"
+    if (Test-Path $publicDesktop) {
+        try {
+            Set-Content -Path "$publicDesktop\XP Thermal Dashboard.url" -Value $urlContent -Encoding ASCII -Force
+            Write-OK "Desktop shortcut created"
+        } catch {
+            Write-Log "Desktop shortcut failed: $_" "WARNING"
+        }
+    }
+
+    # 5. Add/Remove Programs entry (uses the icon for the Apps list)
+    $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\XPThermalService"
+    try {
+        if (-not (Test-Path $uninstallKey)) {
+            New-Item -Path $uninstallKey -Force | Out-Null
+        }
+        $uninstallCmd = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$InstallPath\install.ps1`" -Uninstall -Silent"
+        $props = @{
+            DisplayName     = $ServiceDisplayName
+            DisplayIcon     = $icoDest
+            DisplayVersion  = "2.2"
+            Publisher       = "XenithPulse"
+            URLInfoAbout    = "https://xenithpulse.com"
+            InstallLocation = $InstallPath
+            UninstallString = $uninstallCmd
+            NoModify        = 1
+            NoRepair        = 1
+        }
+        foreach ($k in $props.Keys) {
+            $type = if ($props[$k] -is [int]) { 'DWord' } else { 'String' }
+            New-ItemProperty -Path $uninstallKey -Name $k -Value $props[$k] -PropertyType $type -Force | Out-Null
+        }
+        Write-OK "Add/Remove Programs entry registered"
+        Write-Log "Add/Remove Programs entry registered with icon" "SUCCESS"
+    } catch {
+        Write-Log "Add/Remove Programs registration failed: $_" "WARNING"
+    }
+
+    # 6. Service description in registry — DescriptionString w/ icon hint
+    try {
+        $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+        if (Test-Path $svcKey) {
+            New-ItemProperty -Path $svcKey -Name "ImagePathIcon" -Value $icoDest -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    } catch {}
+
+    # 7. Copy installer for self-uninstall reference
+    $installerSrc = Join-Path $sourceDir "scripts\install.ps1"
+    if (Test-Path $installerSrc) {
+        Copy-Item $installerSrc "$InstallPath\install.ps1" -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-IconAndShortcuts {
+    # Start Menu folder
+    Remove-Item "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\XP Thermal Service" -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Desktop shortcut
+    Remove-Item "$env:PUBLIC\Desktop\XP Thermal Dashboard.url" -Force -ErrorAction SilentlyContinue
+
+    # Add/Remove Programs entry
+    Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\XPThermalService" -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Power request override
+    try {
+        powercfg /requestsoverride PROCESS "$ServiceName"  2>&1 | Out-Null
+        powercfg /requestsoverride PROCESS "node.exe"      2>&1 | Out-Null
+    } catch {}
+
+    Write-Log "Icon, shortcuts, ARP entry removed"
+}
+
 function Install-Watchdog {
-    # Remove existing task
+    # Remove existing tasks
     schtasks /Delete /TN $WatchdogTaskName /F 2>$null | Out-Null
-    
-    # Create watchdog script
+    schtasks /Delete /TN $HeartbeatTaskName /F 2>$null | Out-Null
+
+    # Ensure trigger folder exists (POS app drops restart.trigger here)
+    $triggerDir = "$InstallPath\triggers"
+    if (-not (Test-Path $triggerDir)) {
+        New-Item -ItemType Directory -Path $triggerDir -Force | Out-Null
+    }
+
+    # State file for tracking consecutive HTTP failures (Layer A)
+    $stateFile = "$InstallPath\data\watchdog-state.json"
+
+    # ── Layer A: HTTP-probing watchdog ──────────────────────────────────
     $watchdogScript = @'
-# XP Thermal Service Watchdog
-$serviceName = "xpthermalprintservice.exe"
-$displayName = "XP Thermal Print Service"
-$installPath = "$env:ProgramData\XPThermalService"
-$logFile = "$installPath\logs\watchdog.log"
+# XP Thermal Service Watchdog — Layer A (HTTP probe)
+$serviceName  = "xpthermalprintservice.exe"
+$displayName  = "XP Thermal Print Service"
+$installPath  = "$env:ProgramData\XPThermalService"
+$logFile      = "$installPath\logs\watchdog.log"
+$stateFile    = "$installPath\data\watchdog-state.json"
+$portFile     = "$installPath\active_port.txt"
+$portRangeStart = 9100
+$portRangeEnd   = 9110
+$maxFailuresBeforeRestart = 2
 
 function Write-WatchdogLog($msg) {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp - $msg" | Out-File -Append $logFile -ErrorAction SilentlyContinue
+    "$timestamp [A] $msg" | Out-File -Append $logFile -ErrorAction SilentlyContinue
 }
 
-# Check if service exists and is running
+function Get-ActivePort {
+    if (Test-Path $portFile) {
+        try { return [int](Get-Content $portFile -Raw -ErrorAction Stop).Trim() } catch {}
+    }
+    return $portRangeStart
+}
+
+function Test-HealthEndpoint {
+    param([int]$Port)
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop
+        return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500)
+    } catch {
+        # Non-2xx HTTP responses still mean the server is alive
+        if ($_.Exception.Response -and ($_.Exception.Response.StatusCode.value__ -lt 500)) {
+            return $true
+        }
+        return $false
+    }
+}
+
+function Find-LiveHealthPort {
+    for ($p = $portRangeStart; $p -le $portRangeEnd; $p++) {
+        if (Test-HealthEndpoint -Port $p) { return $p }
+    }
+    return $null
+}
+
+function Get-FailureCount {
+    if (Test-Path $stateFile) {
+        try {
+            $s = Get-Content $stateFile -Raw -ErrorAction Stop | ConvertFrom-Json
+            return [int]$s.failures
+        } catch {}
+    }
+    return 0
+}
+
+function Set-FailureCount {
+    param([int]$Count)
+    try {
+        @{ failures = $Count; updated = (Get-Date).ToString("o") } | ConvertTo-Json | Set-Content $stateFile -Encoding UTF8 -ErrorAction Stop
+    } catch {}
+}
+
+function Invoke-FullRestart {
+    param([string]$Reason)
+    Write-WatchdogLog "FULL RESTART: $Reason"
+
+    # Stop the Windows service first (graceful)
+    try {
+        Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+    } catch {
+        sc.exe stop $serviceName 2>&1 | Out-Null
+    }
+    Start-Sleep -Seconds 3
+
+    # Kill orphaned daemon and node child processes (in case stop didn't clean up)
+    foreach ($exe in @("xpthermalprintservice.exe", "xpthermalservice.exe")) {
+        taskkill /F /IM $exe 2>$null | Out-Null
+    }
+    try {
+        Get-NetTCPConnection -LocalPort ($portRangeStart..$portRangeEnd) -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+            $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+            if ($proc -and $proc.Name -eq "node") {
+                Write-WatchdogLog "Killing stuck node.exe on port $($_.LocalPort) (PID $($_.OwningProcess))"
+                taskkill /F /PID $_.OwningProcess 2>$null | Out-Null
+            }
+        }
+    } catch {}
+
+    Start-Sleep -Seconds 2
+
+    # Start the service again
+    try {
+        Start-Service -Name $serviceName -ErrorAction Stop
+        Write-WatchdogLog "Service restart issued"
+    } catch {
+        sc.exe start $serviceName 2>&1 | Out-Null
+        Write-WatchdogLog "Service restart issued via sc.exe"
+    }
+    Set-FailureCount 0
+}
+
+# ── Main ────────────────────────────────────────────────────────────
 $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if (-not $svc) {
     $svc = Get-Service -DisplayName $displayName -ErrorAction SilentlyContinue
 }
+if (-not $svc) {
+    Write-WatchdogLog "Service not registered — skipping (re-run installer)"
+    return
+}
 
-if ($svc) {
-    if ($svc.Status -ne 'Running') {
-        Write-WatchdogLog "Service not running (Status: $($svc.Status)) - attempting restart"
-        try {
-            Start-Service -Name $svc.Name -ErrorAction Stop
-            Start-Sleep -Seconds 5
-            $svc = Get-Service -Name $svc.Name
-            if ($svc.Status -eq 'Running') {
-                Write-WatchdogLog "Service restarted successfully"
-            } else {
-                Write-WatchdogLog "Service still not running after restart attempt"
-            }
-        }
-        catch {
-            Write-WatchdogLog "Failed to restart service: $_"
-            # Try sc.exe as fallback
-            sc.exe start $svc.Name 2>&1 | Out-Null
-        }
+# 1. If service is not Running, start it immediately
+if ($svc.Status -ne 'Running') {
+    Write-WatchdogLog "Service status=$($svc.Status) — starting"
+    try { Start-Service -Name $svc.Name -ErrorAction Stop } catch { sc.exe start $svc.Name 2>&1 | Out-Null }
+    Set-FailureCount 0
+    return
+}
+
+# 2. Service claims Running — verify HTTP responds
+$port = Get-ActivePort
+$alive = Test-HealthEndpoint -Port $port
+if (-not $alive) {
+    # Try other ports in the range (active_port.txt may be stale)
+    $livePort = Find-LiveHealthPort
+    if ($livePort) {
+        Set-Content -Path $portFile -Value $livePort -ErrorAction SilentlyContinue
+        $alive = $true
     }
 }
-else {
-    Write-WatchdogLog "Service not found - may need reinstallation"
+
+if ($alive) {
+    Set-FailureCount 0
+    return
 }
 
-# Clean old log entries (keep last 500 lines)
+# 3. HTTP probe failed — increment counter; restart on threshold
+$failures = (Get-FailureCount) + 1
+Write-WatchdogLog "HTTP probe FAILED (port $port). Consecutive failures: $failures/$maxFailuresBeforeRestart"
+Set-FailureCount $failures
+
+if ($failures -ge $maxFailuresBeforeRestart) {
+    Invoke-FullRestart -Reason "HTTP probe failed $failures times consecutively"
+}
+
+# Trim log to last 1000 lines
 if (Test-Path $logFile) {
     try {
-        $lines = Get-Content $logFile -Tail 500 -ErrorAction SilentlyContinue
-        if ($lines) {
-            $lines | Set-Content $logFile -ErrorAction SilentlyContinue
-        }
-    } catch { }
+        $lines = Get-Content $logFile -Tail 1000 -ErrorAction SilentlyContinue
+        if ($lines) { $lines | Set-Content $logFile -ErrorAction SilentlyContinue }
+    } catch {}
 }
 '@
-    
+
     $watchdogPath = "$InstallPath\watchdog.ps1"
-    Set-Content -Path $watchdogPath -Value $watchdogScript -Force
-    
-    # Create scheduled task to run every 5 minutes
+    Set-Content -Path $watchdogPath -Value $watchdogScript -Force -Encoding UTF8
+
+    # ── Layer B: Heartbeat (trigger-file watcher + watchdog-of-watchdog) ─
+    $heartbeatScript = @"
+# XP Thermal Service Heartbeat — Layer B (independent fallback)
+`$serviceName     = "xpthermalprintservice.exe"
+`$installPath     = "`$env:ProgramData\XPThermalService"
+`$logFile         = "`$installPath\logs\heartbeat.log"
+`$triggerFile     = "`$installPath\triggers\restart.trigger"
+`$watchdogPath    = "`$installPath\watchdog.ps1"
+`$watchdogTask    = "$WatchdogTaskName"
+
+function Write-HbLog(`$msg) {
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "`$timestamp [B] `$msg" | Out-File -Append `$logFile -ErrorAction SilentlyContinue
+}
+
+# 1. Trigger-file bridge — POS app or admin can drop a file here to force restart
+if (Test-Path `$triggerFile) {
+    `$payload = ""
+    try { `$payload = (Get-Content `$triggerFile -Raw -ErrorAction Stop).Trim() } catch {}
+    Write-HbLog "Trigger file detected (payload='`$payload') — restarting service"
+    Remove-Item `$triggerFile -Force -ErrorAction SilentlyContinue
     try {
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogPath`""
-        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-        
-        Register-ScheduledTask -TaskName $WatchdogTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-        Write-OK "Watchdog scheduled (every 5 min)"
-        Write-Log "Watchdog scheduled task installed" "SUCCESS"
+        Stop-Service -Name `$serviceName -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        foreach (`$exe in @('xpthermalprintservice.exe', 'xpthermalservice.exe')) {
+            taskkill /F /IM `$exe 2>`$null | Out-Null
+        }
+        Start-Sleep -Seconds 2
+        Start-Service -Name `$serviceName -ErrorAction Stop
+        Write-HbLog "Service restarted via trigger file"
+    } catch {
+        sc.exe start `$serviceName 2>&1 | Out-Null
+        Write-HbLog "Service start fallback via sc.exe: `$_"
+    }
+}
+
+# 2. Watchdog-of-watchdog: ensure Layer A scheduled task still exists & is enabled
+try {
+    `$task = Get-ScheduledTask -TaskName `$watchdogTask -ErrorAction Stop
+    if (`$task.State -eq 'Disabled') {
+        Write-HbLog "Layer A task is Disabled — re-enabling"
+        Enable-ScheduledTask -TaskName `$watchdogTask -ErrorAction SilentlyContinue | Out-Null
+    }
+} catch {
+    Write-HbLog "Layer A watchdog task missing — re-creating"
+    if (Test-Path `$watchdogPath) {
+        try {
+            schtasks /Create /TN `$watchdogTask ``
+                /TR "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ```"`$watchdogPath```"" ``
+                /SC MINUTE /MO 2 /RU SYSTEM /F 2>`$null | Out-Null
+        } catch {}
+    }
+}
+
+# 3. Service sanity — if service is Stopped for any reason, try to start it
+`$svc = Get-Service -Name `$serviceName -ErrorAction SilentlyContinue
+if (`$svc -and `$svc.Status -ne 'Running') {
+    Write-HbLog "Service status=`$(`$svc.Status) — starting"
+    try { Start-Service -Name `$svc.Name -ErrorAction Stop } catch { sc.exe start `$svc.Name 2>&1 | Out-Null }
+}
+
+# Trim log
+if (Test-Path `$logFile) {
+    try {
+        `$lines = Get-Content `$logFile -Tail 500 -ErrorAction SilentlyContinue
+        if (`$lines) { `$lines | Set-Content `$logFile -ErrorAction SilentlyContinue }
+    } catch {}
+}
+"@
+
+    $heartbeatPath = "$InstallPath\heartbeat.ps1"
+    Set-Content -Path $heartbeatPath -Value $heartbeatScript -Force -Encoding UTF8
+
+    # ── Register Layer A scheduled task (every 2 minutes) ────────────────
+    try {
+        $actionA   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogPath`""
+        $triggerA  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration (New-TimeSpan -Days 9999)
+        $principalA = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        $settingsA  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        Register-ScheduledTask -TaskName $WatchdogTaskName -Action $actionA -Trigger $triggerA -Principal $principalA -Settings $settingsA -Force | Out-Null
+        Write-OK "Layer A watchdog scheduled (every 2 min, HTTP probe)"
+        Write-Log "Layer A watchdog scheduled task installed" "SUCCESS"
     }
     catch {
-        # Fallback for older Windows
-        schtasks /Create /TN $WatchdogTaskName /TR "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogPath`"" /SC MINUTE /MO 5 /RU SYSTEM /F 2>$null | Out-Null
-        Write-OK "Watchdog scheduled (schtasks)"
-        Write-Log "Watchdog scheduled task installed (schtasks)"
+        schtasks /Create /TN $WatchdogTaskName /TR "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogPath`"" /SC MINUTE /MO 2 /RU SYSTEM /F 2>$null | Out-Null
+        Write-OK "Layer A watchdog scheduled (schtasks fallback)"
+        Write-Log "Layer A watchdog scheduled task installed (schtasks)"
+    }
+
+    # ── Register Layer B heartbeat task (every 10 minutes) ───────────────
+    try {
+        $actionB   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$heartbeatPath`""
+        $triggerB  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 10) -RepetitionDuration (New-TimeSpan -Days 9999)
+        $principalB = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        $settingsB  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        Register-ScheduledTask -TaskName $HeartbeatTaskName -Action $actionB -Trigger $triggerB -Principal $principalB -Settings $settingsB -Force | Out-Null
+        Write-OK "Layer B heartbeat scheduled (every 10 min, trigger-file watcher)"
+        Write-Log "Layer B heartbeat scheduled task installed" "SUCCESS"
+    }
+    catch {
+        schtasks /Create /TN $HeartbeatTaskName /TR "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$heartbeatPath`"" /SC MINUTE /MO 10 /RU SYSTEM /F 2>$null | Out-Null
+        Write-OK "Layer B heartbeat scheduled (schtasks fallback)"
+        Write-Log "Layer B heartbeat scheduled task installed (schtasks)"
     }
 }
 
 function Remove-Watchdog {
     schtasks /Delete /TN $WatchdogTaskName /F 2>$null | Out-Null
-    $watchdogPath = "$InstallPath\watchdog.ps1"
-    Remove-Item $watchdogPath -Force -ErrorAction SilentlyContinue
-    Write-Log "Watchdog removed"
+    schtasks /Delete /TN $HeartbeatTaskName /F 2>$null | Out-Null
+    Remove-Item "$InstallPath\watchdog.ps1"  -Force -ErrorAction SilentlyContinue
+    Remove-Item "$InstallPath\heartbeat.ps1" -Force -ErrorAction SilentlyContinue
+    Write-Log "Watchdog and heartbeat removed"
 }
 
 # ============================================================
@@ -922,7 +1303,7 @@ function Install-Service {
     
     Backup-Config
     
-    @("$InstallPath\data", "$InstallPath\logs", "$InstallPath\backups") | ForEach-Object {
+    @("$InstallPath\data", "$InstallPath\logs", "$InstallPath\backups", "$InstallPath\triggers") | ForEach-Object {
         if (-not (Test-Path $_)) {
             New-Item -ItemType Directory -Path $_ -Force | Out-Null
         }
@@ -956,7 +1337,13 @@ function Install-Service {
         Copy-Item "$sourceDir\public" "$InstallPath\" -Recurse -Force -ErrorAction SilentlyContinue
         Write-Dot "Dashboard assets copied"
     }
-    
+
+    # Copy POS-side restart trigger helper to InstallPath for easy reference
+    if (Test-Path "$sourceDir\scripts\trigger-restart.ps1") {
+        Copy-Item "$sourceDir\scripts\trigger-restart.ps1" "$InstallPath\trigger-restart.ps1" -Force -ErrorAction SilentlyContinue
+        Write-Dot "Restart-trigger helper copied"
+    }
+
     Write-OK "Files deployed"
     
     Write-StepComplete
@@ -991,7 +1378,13 @@ function Install-Service {
         Write-Dot "Port $availablePort available"
     }
     Update-ConfigPort -Port $availablePort
-    
+
+    # Write active port early so external tools (and our own shortcut creator)
+    # can resolve the dashboard URL even before the service finishes booting.
+    try {
+        Set-Content -Path "$InstallPath\active_port.txt" -Value $availablePort -Encoding ASCII -ErrorAction Stop
+    } catch {}
+
     Write-OK "Configuration ready"
     
     Write-StepComplete
@@ -1203,6 +1596,9 @@ svc.install();
         Write-OK "Auto-restart on failure (5s/10s/30s)"
         Write-OK "Delayed auto-start on boot"
         Write-Log "Service recovery options configured"
+
+        # Power management — POS terminals must never sleep
+        Set-PowerManagement
     }
     finally {
         Pop-Location
@@ -1216,6 +1612,9 @@ svc.install();
     Add-FirewallRules
     
     Install-Watchdog
+
+    # Brand icon, shortcuts, Add/Remove Programs entry
+    Install-IconAndShortcuts -Port $availablePort
     
     Write-StepComplete
     
@@ -1359,6 +1758,10 @@ function Uninstall-Service {
     # Remove watchdog first
     Remove-Watchdog
     if (-not $Silent) { Write-OK "Watchdog removed" }
+
+    # Remove icon, shortcuts, Add/Remove Programs entry, power overrides
+    Remove-IconAndShortcuts
+    if (-not $Silent) { Write-OK "Shortcuts and icon removed" }
     
     # Stop all processes
     Stop-AllServiceProcesses

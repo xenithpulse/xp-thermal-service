@@ -1,4 +1,4 @@
-# XP Thermal Service - Diagnostic Script
+﻿# XP Thermal Service - Diagnostic Script
 # Run this script to diagnose installation and connectivity issues
 
 param(

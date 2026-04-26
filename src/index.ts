@@ -355,6 +355,13 @@ const PRODUCTION_CONFIG = {
   selfHealthCheckIntervalMs: 30000, // 30 seconds
   // Number of consecutive health failures before auto-restart
   maxHealthFailures: 3,
+  // Proactive auto-recycle interval (prevents native-module rot over multi-day idle)
+  // After this uptime, the process exits cleanly so the wrapper respawns it.
+  autoRecycleIntervalMs: 24 * 60 * 60 * 1000, // 24 hours
+  // Folder polled for restart trigger files (POS app or admin scripts can drop a file here)
+  triggerFolderName: 'triggers',
+  triggerFileName: 'restart.trigger',
+  triggerPollIntervalMs: 15000, // 15 seconds
 };
 
 /**
@@ -486,6 +493,8 @@ For more information, see the documentation.
   let heartbeatTimer: NodeJS.Timeout | null = null;
   let gcHintTimer: NodeJS.Timeout | null = null;
   let healthWatchdogTimer: NodeJS.Timeout | null = null;
+  let autoRecycleTimer: NodeJS.Timeout | null = null;
+  let triggerWatchTimer: NodeJS.Timeout | null = null;
   let consecutiveHealthFailures = 0;
   let lastHeartbeatTime = Date.now();
 
@@ -499,6 +508,7 @@ For more information, see the documentation.
       // Sleep/wake detection: if elapsed >> expected interval, system likely slept
       if (elapsed > PRODUCTION_CONFIG.heartbeatIntervalMs * 3) {
         const sleepDurationSec = Math.round(elapsed / 1000);
+        const sleepDurationMin = Math.round(elapsed / 60000);
         console.warn(`[WAKE] System appears to have slept for ~${sleepDurationSec}s. Triggering proactive recovery...`);
 
         // Reconnect all printers (they may have lost connection during sleep)
@@ -506,6 +516,16 @@ For more information, see the documentation.
           service.getPrinterManager().connectAll().catch(err => {
             console.error(`[WAKE] Printer reconnect failed: ${err}`);
           });
+        }
+
+        // Long sleep (>1h) — in-process state (TCP sockets, sql.js, USB temp dir
+        // handles) is likely stale. Recycle the process so the wrapper gives us
+        // a fresh slate. This is the single biggest cause of "service shows
+        // running but doesn't print" after multi-day restaurant closures.
+        if (elapsed > 60 * 60 * 1000) {
+          console.warn(`[WAKE] Long sleep detected (${sleepDurationMin} min) — initiating recycle for clean state`);
+          shutdown('LONG_SLEEP_RECOVERY');
+          return;
         }
       }
 
@@ -570,6 +590,85 @@ For more information, see the documentation.
         }
       }, PRODUCTION_CONFIG.gcHintIntervalMs);
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Layer A — Proactive auto-recycle.
+    // After 24h of uptime, exit cleanly so the wrapper respawns the process.
+    // Prevents native-module rot (better-sqlite3, helmet, etc.) and event-loop
+    // degradation that can manifest after multi-day idle periods.
+    //
+    // IDLE-AWARE: a restaurant POS may print mid-recycle. We defer the
+    // recycle for up to 5 min while there are pending or active jobs, then
+    // force it. This avoids cutting off a print mid-batch.
+    // ─────────────────────────────────────────────────────────────────────
+    let recycleDeferralStart = 0;
+    const MAX_RECYCLE_DEFERRAL_MS = 5 * 60 * 1000;
+    autoRecycleTimer = setInterval(() => {
+      const uptimeHours = process.uptime() / 3600;
+      let busy = false;
+      try {
+        const s = service.getStatus();
+        busy = (s.queue.pending + s.queue.processing + s.processor.activeJobs) > 0;
+      } catch {
+        // If we can't read status, the process is degraded — recycle anyway
+      }
+
+      if (busy) {
+        if (recycleDeferralStart === 0) {
+          recycleDeferralStart = Date.now();
+          console.warn(`[AUTO-RECYCLE] Uptime ${uptimeHours.toFixed(1)}h reached threshold but jobs are active — deferring`);
+          return;
+        }
+        if (Date.now() - recycleDeferralStart < MAX_RECYCLE_DEFERRAL_MS) {
+          return; // keep deferring
+        }
+        console.warn(`[AUTO-RECYCLE] Deferral window exceeded — forcing recycle despite ${uptimeHours.toFixed(1)}h uptime`);
+      } else {
+        console.warn(`[AUTO-RECYCLE] Uptime ${uptimeHours.toFixed(1)}h reached recycle threshold — exiting for wrapper respawn`);
+      }
+      shutdown('AUTO_RECYCLE');
+    }, PRODUCTION_CONFIG.autoRecycleIntervalMs);
+    // Allow the timer to keep the event loop alive (default), but don't let
+    // it block shutdown if we're already exiting.
+    autoRecycleTimer.unref?.();
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Layer B — Trigger-file watcher.
+    // External callers (POS app at E:\xp-pos\pos_modules\orders\printing-facility,
+    // admin scripts, watchdog tasks) can drop a file at:
+    //     <cwd>/triggers/restart.trigger
+    // to force a graceful restart, even when the HTTP API is unresponsive.
+    // The file's contents are logged (for traceability) and then the file is
+    // removed so the next restart isn't triggered on respawn.
+    // ─────────────────────────────────────────────────────────────────────
+    const triggerDir = path.join(process.cwd(), PRODUCTION_CONFIG.triggerFolderName);
+    const triggerFile = path.join(triggerDir, PRODUCTION_CONFIG.triggerFileName);
+    try {
+      if (!fs.existsSync(triggerDir)) {
+        fs.mkdirSync(triggerDir, { recursive: true });
+      }
+      // Clean any stale trigger left from a previous crash so we don't loop.
+      if (fs.existsSync(triggerFile)) {
+        try { fs.unlinkSync(triggerFile); } catch { /* ignore */ }
+      }
+    } catch (err) {
+      console.warn(`[TRIGGER] Could not prepare trigger folder: ${err instanceof Error ? err.message : err}`);
+    }
+
+    triggerWatchTimer = setInterval(() => {
+      try {
+        if (fs.existsSync(triggerFile)) {
+          let payload = '';
+          try { payload = fs.readFileSync(triggerFile, 'utf8').trim().slice(0, 500); } catch { /* ignore */ }
+          try { fs.unlinkSync(triggerFile); } catch { /* ignore */ }
+          console.warn(`[TRIGGER] Restart trigger file detected (payload="${payload}") — exiting for wrapper respawn`);
+          shutdown('TRIGGER_FILE');
+        }
+      } catch {
+        // Filesystem hiccup — try again next tick
+      }
+    }, PRODUCTION_CONFIG.triggerPollIntervalMs);
+    triggerWatchTimer.unref?.();
   };
 
   const stopHealthMonitoring = () => {
@@ -584,6 +683,14 @@ For more information, see the documentation.
     if (healthWatchdogTimer) {
       clearInterval(healthWatchdogTimer);
       healthWatchdogTimer = null;
+    }
+    if (autoRecycleTimer) {
+      clearInterval(autoRecycleTimer);
+      autoRecycleTimer = null;
+    }
+    if (triggerWatchTimer) {
+      clearInterval(triggerWatchTimer);
+      triggerWatchTimer = null;
     }
   };
 
