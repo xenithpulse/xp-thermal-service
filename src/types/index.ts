@@ -149,6 +149,8 @@ export interface ReceiptPayload {
   serviceCharge?: number;
   serviceChargeName?: string;
   tip?: number;
+  /** Custom bill adjustments (discounts/surcharges/fees) — each printed as a line. */
+  adjustments?: { name: string; amount: number; isDeduction: boolean }[];
   total: number;
   paymentMethod?: string;
   amountPaid?: number;

@@ -87,6 +87,7 @@ interface LayoutData {
   serviceCharge?: number;
   serviceChargeName?: string;
   tip?: number;
+  adjustments?: { name: string; amount: number; isDeduction: boolean }[];
   total: number;
   paymentMethod?: string;
   amountPaid?: number;
@@ -312,6 +313,13 @@ function buildLines(data: LayoutData, options: ReceiptRenderOptions): StyledLine
     const label = data.taxRate ? `${data.taxLabel || 'Tax'} (${data.taxRate}%):` : `${data.taxLabel || 'Tax'}:`;
     push(L.totalsRow(label, money(data.tax)), 'l');
   }
+  // Custom bill adjustments (discounts/surcharges/fees) — one line each, signed.
+  if (data.adjustments?.length) {
+    for (const adj of data.adjustments) {
+      const amt = adj.isDeduction ? `-${money(adj.amount)}` : money(adj.amount);
+      push(L.totalsRow(`${adj.name}:`, amt), 'l');
+    }
+  }
   if (f.tip && data.tip && data.tip > 0) push(L.totalsRow('Tip:', money(data.tip)), 'l');
   divider();
   if (p.heroTotal) push(`TOTAL  ${money(data.total)}`, 'c', { bold: true, size: 'large' });
@@ -397,6 +405,7 @@ export class ReceiptTemplate implements TemplateRenderer {
       serviceCharge: p.serviceCharge,
       serviceChargeName: p.serviceChargeName,
       tip: p.tip,
+      adjustments: p.adjustments,
       total: p.total,
       paymentMethod: p.paymentMethod,
       amountPaid: p.amountPaid,
