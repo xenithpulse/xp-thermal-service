@@ -22,7 +22,15 @@ $ErrorActionPreference = "Continue"
 $ServiceName = "xpthermalprintservice.exe"
 $ServiceDisplayName = "XP Thermal Print Service"
 $ServiceDescription = "Production-grade thermal printing service for restaurant POS systems"
-$InstallPath = "$env:ProgramData\XPThermalService"
+# ProgramData is normally C:\ProgramData but can be redirected, or missing
+# from the environment block entirely when the installer is launched from a
+# service / scheduled task / restricted shell. Fall back rather than build a
+# rootless path like "\XPThermalService".
+$ProgramDataRoot = $env:ProgramData
+if (-not $ProgramDataRoot) { $ProgramDataRoot = "$env:ALLUSERSPROFILE" }
+if (-not $ProgramDataRoot) { $ProgramDataRoot = "$env:SystemDrive\ProgramData" }
+if (-not $ProgramDataRoot) { $ProgramDataRoot = "C:\ProgramData" }
+$InstallPath = "$ProgramDataRoot\XPThermalService"
 $ServicePortStart = 9100
 $ServicePortEnd = 9110
 $MaxRetries = 3
@@ -577,8 +585,81 @@ function Remove-DaemonFolder {
 # PRE-FLIGHT CHECKS
 # ============================================================
 
+# ─── Free space detection ────────────────────────────────────────────
+# Get-PSDrive's .Free is not dependable across machines: it is $null when the
+# target letter isn't a loaded PSDrive, when ProgramData is redirected to a
+# UNC path or a mount point without a letter, and under restricted language
+# modes (AppLocker / WDAC). A $null compares as 0, which is how a machine with
+# plenty of space ends up being told it has "0MB". Try each method in turn and
+# return $null for "genuinely unknown" so the caller can distinguish that from
+# "actually full".
+function Get-FreeSpaceBytes {
+    param([string]$Path)
+
+    # The install folder may not exist yet - walk up to the nearest real parent.
+    $probe = $Path
+    while ($probe -and -not (Test-Path -LiteralPath $probe -ErrorAction SilentlyContinue)) {
+        $parent = Split-Path -Parent $probe
+        if (-not $parent -or $parent -eq $probe) { break }
+        $probe = $parent
+    }
+    if (-not $probe) { $probe = $Path }
+
+    $root = ""
+    try { $root = [System.IO.Path]::GetPathRoot($probe) } catch { }
+    $deviceId = ($root -replace '\\+$', '')
+
+    # 1. .NET DriveInfo - independent of PowerShell's provider drive list.
+    if ($root -and $root -notmatch '^\\\\') {
+        try {
+            $di = New-Object System.IO.DriveInfo $root
+            if ($di.IsReady) {
+                Write-Log "Disk: DriveInfo reports $($di.AvailableFreeSpace) bytes free on $root" "INFO"
+                return [int64]$di.AvailableFreeSpace
+            }
+            Write-Log "Disk: DriveInfo says $root is not ready" "WARNING"
+        }
+        catch { Write-Log "Disk: DriveInfo failed on '$root': $_" "WARNING" }
+    }
+
+    # 2. CIM, then legacy WMI - covers redirected and mapped volumes.
+    if ($deviceId -match '^[A-Za-z]:$') {
+        foreach ($method in 'Cim', 'Wmi') {
+            try {
+                $ld = if ($method -eq 'Cim') {
+                    Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$deviceId'" -ErrorAction Stop
+                } else {
+                    Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='$deviceId'" -ErrorAction Stop
+                }
+                if ($ld -and $null -ne $ld.FreeSpace) {
+                    Write-Log "Disk: $method reports $($ld.FreeSpace) bytes free on $deviceId" "INFO"
+                    return [int64]$ld.FreeSpace
+                }
+            }
+            catch { Write-Log "Disk: $method query failed on '$deviceId': $_" "WARNING" }
+        }
+    }
+
+    # 3. Get-PSDrive - the original method, kept as a last resort.
+    if ($deviceId -match '^[A-Za-z]:$') {
+        try {
+            $free = (Get-PSDrive $deviceId.TrimEnd(':') -ErrorAction Stop).Free
+            if ($null -ne $free) {
+                Write-Log "Disk: Get-PSDrive reports $free bytes free on $deviceId" "INFO"
+                return [int64]$free
+            }
+        }
+        catch { Write-Log "Disk: Get-PSDrive failed on '$deviceId': $_" "WARNING" }
+    }
+
+    Write-Log "Disk: could not determine free space for '$Path' (root '$root') by any method" "WARNING"
+    return $null
+}
+
 function Test-Prerequisites {
     $issues = @()
+
+    Write-Log "Pre-flight: InstallPath='$InstallPath' PSVersion=$($PSVersionTable.PSVersion) LanguageMode=$($ExecutionContext.SessionState.LanguageMode) 64bit=$([Environment]::Is64BitProcess)" "INFO"
     
     # 1. Administrator check
     if (-not (Test-Administrator)) {
@@ -601,11 +682,15 @@ function Test-Prerequisites {
         }
     }
     
-    # 3. Disk space check (need at least 200MB)
-    $drive = (Split-Path $InstallPath -Qualifier)
-    $freeSpace = (Get-PSDrive $drive.TrimEnd(':')).Free
+    # 3. Disk space check (need at least 200MB). An undeterminable volume is a
+    #    warning, never a hard stop - blocking a healthy machine is far worse
+    #    than letting a genuinely full one fail later with a real disk error.
     $requiredSpace = 200MB
-    if ($freeSpace -lt $requiredSpace) {
+    $freeSpace = Get-FreeSpaceBytes -Path $InstallPath
+    if ($null -eq $freeSpace) {
+        Write-WARN "Could not read free space for $InstallPath - continuing anyway"
+    }
+    elseif ($freeSpace -lt $requiredSpace) {
         $issues += "Insufficient disk space. Need 200MB, have $([math]::Round($freeSpace/1MB))MB"
     }
     else {
