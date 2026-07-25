@@ -143,8 +143,12 @@ export interface ReceiptPayload {
   subtotal: number;
   tax?: number;
   taxRate?: number;
+  taxLabel?: string;
   discount?: number;
   discountName?: string;
+  serviceCharge?: number;
+  serviceChargeName?: string;
+  tip?: number;
   total: number;
   paymentMethod?: string;
   amountPaid?: number;
@@ -152,10 +156,67 @@ export interface ReceiptPayload {
   customerName?: string;
   tableName?: string;
   serverName?: string;
+  orderMode?: string;
   header?: ReceiptHeader;
   footer?: ReceiptFooter;
   barcode?: string;
   qrCode?: string;
+  /**
+   * Tenant render contract from the POS. When present, the receipt template
+   * dispatches on `template` and honors every field toggle + currency + QR.
+   * MUST stay in sync with xp-pos types/settings.types.ts ReceiptRenderOptions.
+   */
+  options?: ReceiptRenderOptions;
+}
+
+// ── Receipt render contract (mirror of POS types/settings.types.ts) ──────────
+
+export type ReceiptTemplateId = 'classic' | 'compact' | 'elegant' | 'minimal';
+
+export interface ReceiptRenderFields {
+  logo: boolean;
+  businessName: boolean;
+  address: boolean;
+  phone: boolean;
+  email: boolean;
+  website: boolean;
+  taxId: boolean;
+  orderNumber: boolean;
+  dateTime: boolean;
+  table: boolean;
+  server: boolean;
+  customer: boolean;
+  orderMode: boolean;
+  itemModifiers: boolean;
+  itemNotes: boolean;
+  unitPrice: boolean;
+  taxBreakdown: boolean;
+  discount: boolean;
+  serviceCharge: boolean;
+  tip: boolean;
+  paymentMethod: boolean;
+  amountPaid: boolean;
+  change: boolean;
+  qrCode: boolean;
+  footerMessage: boolean;
+  thankYou: boolean;
+  poweredBy: boolean;
+}
+
+export interface ReceiptRenderOptions {
+  template: ReceiptTemplateId;
+  /** Characters per line — tenant-configurable to match the exact printer. */
+  paperWidth: number;
+  currency: { symbol: string; decimals: number; position: 'before' | 'after' };
+  fields: ReceiptRenderFields;
+  qr?: { content: string };
+}
+
+/** 1-bit packed logo raster from the POS (base64), for GS v 0. */
+export interface RasterLogo {
+  data: string;
+  width: number;
+  height: number;
 }
 
 export interface ReceiptItem {
@@ -173,7 +234,8 @@ export interface ReceiptHeader {
   storePhone?: string;
   storeEmail?: string;
   taxId?: string;
-  logo?: Buffer;
+  /** 1-bit packed raster (base64) prepared by the POS. */
+  logo?: RasterLogo;
 }
 
 export interface ReceiptFooter {
@@ -379,6 +441,7 @@ export interface ServiceConfig {
   queue: QueueConfig;
   logging: LoggingConfig;
   printers: PrinterConfig[];
+  backup: BackupConfig;
 }
 
 export interface ServerConfig {
@@ -416,6 +479,57 @@ export interface LoggingConfig {
   maxFiles?: number;
   maxSize?: string;
   console: boolean;
+}
+
+// ============================================================================
+// Backup Types
+// ============================================================================
+
+/**
+ * Connection details the backup subsystem needs. The *policy* (which paths,
+ * retention, schedule) is owned by the POS "Server Management" dashboard and
+ * pulled from the POS API — this config only says how to reach the POS and the
+ * MongoDB running inside Docker on the same box.
+ */
+export interface BackupConfig {
+  enabled: boolean;
+  // POS base URL as reachable from THIS host. Caddy publishes the POS on the
+  // box's host port, so loopback works regardless of the box's LAN IP.
+  posBaseUrl: string;
+  // How often to poll the POS for config, schedule, and manual run requests.
+  pollIntervalMs: number;
+  // Max time to allow a single mongodump before treating it as failed.
+  timeoutMs: number;
+  // Prefix for backup archive filenames written into each path.
+  filenamePrefix: string;
+  mongo: {
+    // The dump runs via `docker exec` into the compose Mongo container, found
+    // by its compose service label. Set containerName to override discovery.
+    dockerComposeService: string;
+    containerName?: string;
+    database: string;
+    gzip: boolean;
+  };
+}
+
+export type BackupOutcome = 'success' | 'partial' | 'error';
+
+export interface BackupPathResult {
+  path: string;
+  status: 'active' | 'error';
+  sizeBytes: number;        // total size of backups currently in this path
+  lastBackupTime: string;   // ISO — when this path last received a backup
+  error?: string;
+}
+
+export interface BackupRunResult {
+  requestId?: string;
+  startedAt: string;        // ISO
+  finishedAt: string;       // ISO
+  status: BackupOutcome;
+  message: string;
+  totalBytes: number;       // size of the dump archive produced this run
+  paths: BackupPathResult[];
 }
 
 // ============================================================================

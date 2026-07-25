@@ -16,6 +16,7 @@ import { JobQueue } from '../queue/job-queue';
 import { PrinterManager } from '../printers/printer-manager';
 import { JobProcessor } from '../queue/processor';
 import { ConfigManager } from '../utils/config';
+import type { BackupScheduler } from '../backup/backup-scheduler';
 import { USBPrinterAdapter } from '../printers/usb-adapter';
 import { Commands } from '../escpos/builder';
 import {
@@ -75,6 +76,7 @@ export class ApiServer {
   private startTime: number = Date.now();
   private activeConnections: Set<import('net').Socket> = new Set();
   private isShuttingDown: boolean = false;
+  private backupScheduler: BackupScheduler | null = null;
 
   constructor(
     queue: JobQueue,
@@ -241,8 +243,9 @@ export class ApiServer {
    * Request timeout middleware
    */
   private requestTimeout(req: Request, res: Response, next: NextFunction): void {
-    // Skip timeout for streaming endpoints
-    if (req.path === '/api/logs/stream') {
+    // Skip timeout for streaming endpoints and long-running restore (mongorestore
+    // of a full DB can exceed the default request timeout).
+    if (req.path === '/api/logs/stream' || req.path === '/api/backup/restore') {
       return next();
     }
 
@@ -364,6 +367,13 @@ export class ApiServer {
 
     // Service control (loopback-only restart trigger for POS app)
     this.app.post('/api/service/restart', this.handleServiceRestart.bind(this));
+
+    // Backup (policy is owned by the POS dashboard; these give on-box control
+    // and inspection of the backup subsystem)
+    this.app.get('/api/backup/status', this.handleBackupStatus.bind(this));
+    this.app.get('/api/backup/list', this.handleBackupList.bind(this));
+    this.app.post('/api/backup/run', this.handleBackupRun.bind(this));
+    this.app.post('/api/backup/restore', this.handleBackupRestore.bind(this));
 
     // Configuration management
     this.app.get('/api/config', this.handleGetConfig.bind(this));
@@ -881,6 +891,74 @@ export class ApiServer {
       console.warn('[API] Restart requested — exiting process for wrapper respawn');
       process.exit(1);
     }, 500);
+  }
+
+  // ── Backup Handlers ──
+
+  /** Attach the backup scheduler once it's constructed (see index.ts). */
+  setBackupScheduler(scheduler: BackupScheduler): void {
+    this.backupScheduler = scheduler;
+  }
+
+  private handleBackupStatus(_req: Request, res: Response): void {
+    if (!this.backupScheduler) {
+      res.status(503).json({ error: 'Backup subsystem is disabled' });
+      return;
+    }
+    res.json(this.backupScheduler.getStatus());
+  }
+
+  private handleBackupRun(_req: Request, res: Response): void {
+    if (!this.backupScheduler) {
+      res.status(503).json({ error: 'Backup subsystem is disabled' });
+      return;
+    }
+    // Fire-and-forget: a dump can exceed the HTTP request timeout, so we
+    // acknowledge immediately and let the caller poll /api/backup/status.
+    this.backupScheduler
+      .triggerNow()
+      .catch((err) =>
+        this.logger.error(
+          { error: err instanceof Error ? err.message : err },
+          'Manual backup failed'
+        )
+      );
+    res.status(202).json({ success: true, message: 'Backup started' });
+  }
+
+  private async handleBackupList(_req: Request, res: Response): Promise<void> {
+    if (!this.backupScheduler) {
+      res.status(503).json({ error: 'Backup subsystem is disabled' });
+      return;
+    }
+    try {
+      res.json({ paths: await this.backupScheduler.listBackups() });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  private async handleBackupRestore(req: Request, res: Response): Promise<void> {
+    if (!this.backupScheduler) {
+      res.status(503).json({ error: 'Backup subsystem is disabled' });
+      return;
+    }
+    // Restore drops and reloads the database — restrict to on-box callers.
+    const remoteIp = req.ip || req.socket.remoteAddress || '';
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteIp)) {
+      res.status(403).json({ error: 'Forbidden', message: 'Restore is only available from localhost' });
+      return;
+    }
+
+    const dir = typeof req.body?.path === 'string' ? req.body.path : '';
+    const file = typeof req.body?.file === 'string' ? req.body.file : '';
+    if (!dir || !file) {
+      res.status(400).json({ error: 'path and file are required' });
+      return;
+    }
+
+    const result = await this.backupScheduler.restore(path.join(dir, file));
+    res.status(result.success ? 200 : 400).json(result);
   }
 
   private handleMetrics(_req: Request, res: Response): void {

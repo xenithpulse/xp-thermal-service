@@ -325,6 +325,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
         <span>Queue</span>
       </div>
+      <div class="nav-item" data-page="backup">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+        <span>Backup</span>
+      </div>
       <div class="nav-item" data-page="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
         <span>Settings</span>
@@ -466,6 +470,33 @@
           <div class="card-body">
             <div class="stat-grid" id="queueStats"></div>
             <div class="queue-bar" id="queueBar"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ BACKUP PAGE ═══ -->
+      <div class="page" id="page-backup">
+        <div class="card">
+          <div class="card-header">
+            <h3>Database Backup</h3>
+            <button class="btn btn-success btn-sm" data-action="runBackupNow">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Run Backup Now
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="stat-grid" id="backupStats"></div>
+            <p class="form-hint" id="backupHint" style="margin-top:12px">
+              Backup paths, retention and the daily schedule are configured in the POS
+              “Server Management → Backups” screen. This page runs and restores them on the box.
+            </p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3>Available Backups</h3></div>
+          <div class="card-body">
+            <div id="backupList"><p class="form-hint">Loading…</p></div>
           </div>
         </div>
       </div>
@@ -693,8 +724,8 @@ function formatUptime(ms) {
 const state = {
   currentPage: 'overview',
   currentSettingsTab: 'server',
-  pages: ['overview','printers','jobs','queue','settings','system'],
-  titles: { overview:'Overview', printers:'Printers', jobs:'Print Jobs', queue:'Queue', settings:'Settings', system:'System' }
+  pages: ['overview','printers','jobs','queue','backup','settings','system'],
+  titles: { overview:'Overview', printers:'Printers', jobs:'Print Jobs', queue:'Queue', backup:'Backup', settings:'Settings', system:'System' }
 };
 
 function showPage(name) {
@@ -713,6 +744,9 @@ function showPage(name) {
 
   // Update title
   document.getElementById('pageTitle').textContent = state.titles[name] || name;
+
+  // Refresh data for pages that aren't on the global poll
+  if (name === 'backup' && typeof loadBackup === 'function') loadBackup();
 
   // Sync hash without triggering hashchange
   const hash = '#' + name;
@@ -766,6 +800,13 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
 
+    // data-restore-*: restore a specific backup archive
+    const restoreBtn = e.target.closest('[data-restore-file]');
+    if (restoreBtn) {
+      restoreBackup(restoreBtn.dataset.restorePath, restoreBtn.dataset.restoreFile);
+      return;
+    }
+
     // data-action: mapped to functions
     const actionBtn = e.target.closest('[data-action]');
     if (actionBtn) {
@@ -773,7 +814,8 @@ document.addEventListener('DOMContentLoaded', function() {
         openAddPrinter, closeModal, savePrinter, loadJobs,
         pauseQueue, resumeQueue, clearFailedJobs,
         saveServerConfig, saveSecurityConfig,
-        refreshPrinters: loadPrinters
+        refreshPrinters: loadPrinters,
+        runBackupNow
       };
       const fn = actions[actionBtn.dataset.action];
       if (fn) fn();
@@ -1284,6 +1326,82 @@ async function savePrinter() {
   }
 }
 
+// ── Backup ──
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const k = 1024, u = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(n) / Math.log(k));
+  return (n / Math.pow(k, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+
+async function loadBackup() {
+  // Status
+  try {
+    const s = await api('GET', '/api/backup/status');
+    const last = s.lastRun;
+    const result = s.running ? 'running…' : (last ? last.status : 'no runs yet');
+    const resultColor = result.startsWith('success') ? 'green' : result === 'error' ? 'red' : result.startsWith('run') ? 'blue' : 'yellow';
+    document.getElementById('backupStats').innerHTML = `
+      <div class="stat-card"><div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg></div><div class="stat-info"><div class="stat-val" style="font-size:14px">${esc(s.posLanUrl || s.posBaseUrl || '—')}</div><div class="stat-lbl">POS reachable at</div></div></div>
+      <div class="stat-card"><div class="stat-icon ${s.lastPollOk ? 'green' : 'red'}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div><div class="stat-info"><div class="stat-val">${s.lastPollOk ? 'OK' : 'Down'}</div><div class="stat-lbl">POS connection</div></div></div>
+      <div class="stat-card"><div class="stat-icon ${resultColor}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="12 6 12 12 16 14"/><circle cx="12" cy="12" r="10"/></svg></div><div class="stat-info"><div class="stat-val" style="font-size:15px">${esc(result)}</div><div class="stat-lbl">Last result</div></div></div>
+      <div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div><div class="stat-info"><div class="stat-val" style="font-size:14px">${last ? fmtBytes(last.totalBytes) : '—'}</div><div class="stat-lbl">Last backup size</div></div></div>
+    `;
+    if (last && last.message) {
+      document.getElementById('backupHint').textContent = last.message;
+    }
+  } catch {
+    document.getElementById('backupStats').innerHTML = '<p class="form-hint">Backup subsystem unavailable.</p>';
+  }
+
+  // Available backups per path
+  try {
+    const d = await api('GET', '/api/backup/list');
+    const paths = d.paths || [];
+    if (!paths.length) {
+      document.getElementById('backupList').innerHTML = '<p class="form-hint">No backup paths configured yet. Add them in the POS Server Management screen.</p>';
+      return;
+    }
+    document.getElementById('backupList').innerHTML = paths.map(p => `
+      <div style="margin-bottom:18px">
+        <div style="font-weight:600;margin-bottom:8px">${esc(p.path)} <span class="form-hint" style="display:inline">(${p.files.length} file${p.files.length===1?'':'s'})</span></div>
+        ${p.files.length ? `<table><thead><tr><th>File</th><th>Size</th><th>Created</th><th></th></tr></thead><tbody>${
+          p.files.map(f => `<tr>
+            <td>${esc(f.name)}</td>
+            <td>${fmtBytes(f.sizeBytes)}</td>
+            <td>${new Date(f.mtime).toLocaleString()}</td>
+            <td style="text-align:right"><button class="btn btn-danger btn-sm" data-restore-path="${esc(p.path)}" data-restore-file="${esc(f.name)}">Restore</button></td>
+          </tr>`).join('')
+        }</tbody></table>` : '<p class="form-hint">No backups in this path yet.</p>'}
+      </div>
+    `).join('');
+  } catch {
+    document.getElementById('backupList').innerHTML = '<p class="form-hint">Could not list backups.</p>';
+  }
+}
+
+async function runBackupNow() {
+  try {
+    const d = await api('POST', '/api/backup/run');
+    toast(d.message || 'Backup started');
+    setTimeout(loadBackup, 3000);
+  } catch (e) {
+    toast('Failed to start backup: ' + (e.message || ''), 'error');
+  }
+}
+
+async function restoreBackup(dir, file) {
+  if (!confirm(`Restore the database from:\n\n${file}\n\nThis REPLACES the current POS data and cannot be undone. Continue?`)) return;
+  toast('Restoring… this may take a moment', 'success');
+  try {
+    const d = await api('POST', '/api/backup/restore', { path: dir, file });
+    if (d.success) toast(d.message || 'Database restored');
+    else toast(d.message || d.error || 'Restore failed', 'error');
+  } catch (e) {
+    toast('Restore failed: ' + (e.message || ''), 'error');
+  }
+}
+
 // ── Init ──
 (async () => {
   await discoverPort();
@@ -1296,14 +1414,16 @@ async function savePrinter() {
   loadQueueStats();
   loadSystemInfo();
   loadJobs();
+  loadBackup();
 })();
 
-setInterval(() => { 
-  loadHealth(); 
-  loadPrinters(); 
-  loadQueueStats(); 
+setInterval(() => {
+  loadHealth();
+  loadPrinters();
+  loadQueueStats();
   loadSystemInfo();
   loadJobs();
+  if (state.currentPage === 'backup') loadBackup();
 }, 10000);
 </script>
 </body>

@@ -15,6 +15,8 @@ import { JobQueue } from './queue/job-queue';
 import { JobProcessor } from './queue/processor';
 import { TemplateEngine } from './templates/engine';
 import { ApiServer } from './api/server';
+import { BackupManager } from './backup/backup-manager';
+import { BackupScheduler } from './backup/backup-scheduler';
 import { ServiceEvent } from './types';
 
 export class ThermalPrintService extends EventEmitter {
@@ -26,6 +28,8 @@ export class ThermalPrintService extends EventEmitter {
   private processor!: JobProcessor;
   private templateEngine!: TemplateEngine;
   private apiServer!: ApiServer;
+  private backupManager!: BackupManager;
+  private backupScheduler!: BackupScheduler;
   private isRunning = false;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -134,6 +138,13 @@ export class ThermalPrintService extends EventEmitter {
       this.logger
     );
     this.logger.info('API server initialized');
+
+    // Initialize backup subsystem (policy comes from the POS dashboard)
+    const backupConfig = this.config.getBackupConfig();
+    this.backupManager = new BackupManager(backupConfig, this.logger);
+    this.backupScheduler = new BackupScheduler(backupConfig, this.backupManager, this.logger);
+    this.apiServer.setBackupScheduler(this.backupScheduler);
+    this.logger.info('Backup subsystem initialized');
   }
 
   /**
@@ -159,6 +170,9 @@ export class ThermalPrintService extends EventEmitter {
 
       // Start the job processor
       this.processor.start();
+
+      // Start the backup scheduler (polls the POS for policy + run requests)
+      this.backupScheduler.start();
 
       this.isRunning = true;
       this.emit(ServiceEvent.SERVICE_STARTED, { timestamp: Date.now() });
@@ -205,6 +219,9 @@ export class ThermalPrintService extends EventEmitter {
     this.logger.info('Stopping XP Thermal Service...');
 
     try {
+      // Stop the backup scheduler
+      this.backupScheduler?.stop();
+
       // Stop accepting new jobs
       this.processor.pause();
 

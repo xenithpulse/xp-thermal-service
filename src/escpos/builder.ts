@@ -481,6 +481,34 @@ export class EscPosBuilder {
   }
 
   /**
+   * Print a monochrome raster image (GS v 0) — used for the business logo.
+   * `logo.data` is base64 of row-major, MSB-first packed bits (1 = black),
+   * exactly ceil(width/8) bytes per row, prepared by the POS.
+   *
+   * Gated on `supportsImage`: a printer flagged as non-graphics would render the
+   * raster bytes as text ("random numbers") and waste paper, so we skip instead.
+   * Set the printer's supportsImage capability true to enable the logo.
+   */
+  raster(logo: { data: string; width: number; height: number }): this {
+    if (!this.capabilities.supportsImage) {
+      return this;
+    }
+    const bytes = Buffer.from(logo.data, 'base64');
+    const bytesPerRow = Math.ceil(logo.width / 8);
+    if (bytesPerRow <= 0 || logo.height <= 0 || bytes.length < bytesPerRow * logo.height) {
+      return this; // malformed — skip rather than emit garbage
+    }
+    const xL = bytesPerRow & 0xff;
+    const xH = (bytesPerRow >> 8) & 0xff;
+    const yL = logo.height & 0xff;
+    const yH = (logo.height >> 8) & 0xff;
+    // GS v 0 m xL xH yL yH d1..dk  (m=0 normal density)
+    this.buffer.push(GS, 0x76, 0x30, 0x00, xL, xH, yL, yH);
+    this.buffer.push(...Array.from(bytes.subarray(0, bytesPerRow * logo.height)));
+    return this;
+  }
+
+  /**
    * Cut paper
    */
   cut(partial = false): this {

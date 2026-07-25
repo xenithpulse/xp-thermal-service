@@ -100,12 +100,29 @@ const LoggingConfigSchema = z.object({
   console: z.boolean().default(true)
 });
 
+const BackupConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  // Loopback works regardless of the box's LAN IP because Caddy publishes the
+  // POS on the host's port 8080.
+  posBaseUrl: z.string().default('http://127.0.0.1:8080'),
+  pollIntervalMs: z.number().min(5000).default(30000),
+  timeoutMs: z.number().min(10000).default(300000),
+  filenamePrefix: z.string().default('pos-backup'),
+  mongo: z.object({
+    dockerComposeService: z.string().default('mongo'),
+    containerName: z.string().optional(),
+    database: z.string().default('POS_PROD'),
+    gzip: z.boolean().default(true)
+  }).default({})
+});
+
 const ServiceConfigSchema = z.object({
   server: ServerConfigSchema.default({}),
   security: SecurityConfigSchema.default({}),
   queue: QueueConfigSchema.default({}),
   logging: LoggingConfigSchema.default({}),
-  printers: z.array(PrinterConfigSchema).default([])
+  printers: z.array(PrinterConfigSchema).default([]),
+  backup: BackupConfigSchema.default({})
 });
 
 export class ConfigManager {
@@ -251,6 +268,26 @@ export class ConfigManager {
    */
   getLoggingConfig() {
     return this.config.logging;
+  }
+
+  /**
+   * Get backup configuration
+   */
+  getBackupConfig() {
+    return this.config.backup;
+  }
+
+  /**
+   * Update backup config with validation
+   */
+  updateBackupConfig(updates: Record<string, unknown>): void {
+    const merged = { ...this.config.backup, ...updates };
+    const result = BackupConfigSchema.safeParse(merged);
+    if (!result.success) {
+      throw new Error(`Invalid backup config: ${result.error.message}`);
+    }
+    this.config.backup = result.data as typeof this.config.backup;
+    this.saveConfig();
   }
 
   /**

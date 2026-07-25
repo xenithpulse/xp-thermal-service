@@ -36,6 +36,18 @@
     "file": "./logs/service.log",
     "console": true
   },
+  "backup": {
+    "enabled": true,
+    "posBaseUrl": "http://127.0.0.1:8080",
+    "pollIntervalMs": 30000,
+    "timeoutMs": 300000,
+    "filenamePrefix": "pos-backup",
+    "mongo": {
+      "dockerComposeService": "mongo",
+      "database": "POS_PROD",
+      "gzip": true
+    }
+  },
   "printers": [
     {
       "id": "kitchen",
