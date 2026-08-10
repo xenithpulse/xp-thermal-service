@@ -5,11 +5,22 @@
  * destination paths (local folder, external/USB drive, or network share),
  * enforcing per-path retention.
  *
- * The dump itself runs *inside* Docker via `docker exec … mongodump`, because
- * on a Windows appliance MongoDB runs in a container and is not published to
- * the host. This service, running natively on Windows, is the only component
- * that can then write those dumps to real Windows drives / UNC shares — which
- * is exactly why backups live here rather than in the container.
+ * The dump runs the bundled `mongodump.exe` directly against the POS database
+ * on loopback. This service, running natively on Windows, is the component that
+ * can write those dumps to real Windows drives / USB / UNC shares — which is
+ * why backups live here.
+ *
+ * ── Migrated from Docker ────────────────────────────────────────────────────
+ * This previously ran `docker exec <container> mongodump`, locating the
+ * container by its compose service label, because MongoDB lived in a container
+ * whose port was never published to the host. The POS is now a set of native
+ * Windows services: mongod listens on 127.0.0.1:27017 and there is no container
+ * to exec into. The streaming, timeout, retention and multi-destination logic
+ * below is unchanged — only the process being spawned is different.
+ *
+ * mongodump.exe and mongorestore.exe are shipped by the XP POS installer under
+ * <install dir>\mongodb\bin (see installer/deps.json in the POS repo). They are
+ * a separate download from the MongoDB server archive and are easy to forget.
  */
 
 import { spawn } from 'child_process';
@@ -60,64 +71,59 @@ export class BackupManager {
   }
 
   /**
-   * Run a `docker` command and resolve its trimmed stdout. Rejects on non-zero
-   * exit with stderr included so failures surface clearly on the dashboard.
+   * Absolute path to one of the bundled MongoDB tools.
+   *
+   * Resolved and existence-checked up front so a missing or mis-pathed install
+   * fails with something a technician can act on, rather than Windows' bare
+   * ENOENT from spawn(). Replaces the old container-discovery step.
    */
-  private dockerText(args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn('docker', args, { windowsHide: true });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (d) => (out += d.toString()));
-      child.stderr.on('data', (d) => (err += d.toString()));
-      child.on('error', (e) =>
-        reject(new Error(`Failed to run docker (is Docker Desktop running?): ${e.message}`))
+  private toolPath(tool: 'mongodump' | 'mongorestore'): string {
+    const exe = process.platform === 'win32' ? `${tool}.exe` : tool;
+    const full = path.join(this.config.mongo.binDir, exe);
+    if (!fs.existsSync(full)) {
+      throw new Error(
+        `${exe} not found at ${full}. ` +
+          `Check backup.mongo.binDir in config.json - it should point at the ` +
+          `mongodb\\bin folder inside the XP POS install directory.`
       );
-      child.on('close', (code) => {
-        if (code === 0) resolve(out.trim());
-        else reject(new Error(err.trim() || `docker exited with code ${code}`));
-      });
-    });
+    }
+    return full;
   }
 
-  /** Resolve the Mongo container id, honouring an explicit override. */
-  private async resolveContainer(): Promise<string> {
-    if (this.config.mongo.containerName) {
-      return this.config.mongo.containerName;
-    }
-    const svc = this.config.mongo.dockerComposeService;
-    const ids = await this.dockerText([
-      'ps',
-      '--filter',
-      `label=com.docker.compose.service=${svc}`,
-      '--format',
-      '{{.ID}}',
-    ]);
-    const first = ids.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
-    if (!first) {
-      throw new Error(
-        `No running container found for compose service "${svc}". Is the POS stack up?`
-      );
-    }
-    return first;
+  /** Connection arguments shared by mongodump and mongorestore. */
+  private connectionArgs(): string[] {
+    return [
+      '--host',
+      this.config.mongo.host,
+      '--port',
+      String(this.config.mongo.port),
+    ];
   }
 
   /**
-   * Stream `mongodump --archive` from inside the container into a local temp
-   * file. Returns the temp file path.
+   * Stream `mongodump --archive` into a local temp file. Returns the temp path.
+   *
+   * `--archive` with no value makes mongodump write the archive to stdout,
+   * which is what lets us pipe straight to disk. That is the same contract the
+   * Docker version relied on, so the streaming below is unchanged.
    */
-  private dumpToTempFile(container: string): Promise<string> {
+  private dumpToTempFile(): Promise<string> {
     const tmpFile = path.join(
       os.tmpdir(),
       `${this.config.filenamePrefix}-${this.timestamp()}${this.archiveExt()}`
     );
 
-    const args = ['exec', container, 'mongodump', '--archive', `--db=${this.config.mongo.database}`];
+    const exe = this.toolPath('mongodump');
+    const args = [
+      ...this.connectionArgs(),
+      '--archive',
+      `--db=${this.config.mongo.database}`,
+    ];
     if (this.config.mongo.gzip) args.push('--gzip');
 
     return new Promise((resolve, reject) => {
       const out = fs.createWriteStream(tmpFile);
-      const child = spawn('docker', args, { windowsHide: true });
+      const child = spawn(exe, args, { windowsHide: true });
       let err = '';
       let settled = false;
 
@@ -136,7 +142,7 @@ export class BackupManager {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        reject(new Error(`Failed to run docker exec mongodump: ${e.message}`));
+        reject(new Error(`Failed to run mongodump: ${e.message}`));
       });
       child.on('close', (code) => {
         if (settled) return;
@@ -238,8 +244,7 @@ export class BackupManager {
 
   /**
    * Restore the POS database from a backup archive. DESTRUCTIVE: drops the
-   * target collections first. Streams the archive into
-   * `docker exec -i mongorestore`.
+   * target collections first. Streams the archive into mongorestore's stdin.
    */
   async restore(archiveFile: string): Promise<{ success: boolean; message: string }> {
     if (this.running) {
@@ -251,23 +256,25 @@ export class BackupManager {
 
     this.running = true;
     try {
-      const container = await this.resolveContainer();
+      const exe = this.toolPath('mongorestore');
       const db = this.config.mongo.database;
+      // `--archive` with no value makes mongorestore read from stdin, which the
+      // pipe below feeds. Same contract as the previous `docker exec -i` form.
       const args = [
-        'exec',
-        '-i',
-        container,
-        'mongorestore',
+        ...this.connectionArgs(),
         '--archive',
         '--drop',
         `--nsInclude=${db}.*`,
       ];
       if (this.config.mongo.gzip) args.push('--gzip');
 
-      this.logger.warn({ archiveFile, container }, 'Starting DB restore (destructive)');
+      this.logger.warn(
+        { archiveFile, host: this.config.mongo.host, port: this.config.mongo.port },
+        'Starting DB restore (destructive)'
+      );
 
       await new Promise<void>((resolve, reject) => {
-        const child = spawn('docker', args, { windowsHide: true });
+        const child = spawn(exe, args, { windowsHide: true });
         let err = '';
         const timer = setTimeout(() => {
           child.kill('SIGKILL');
@@ -276,7 +283,7 @@ export class BackupManager {
         child.stderr.on('data', (d) => (err += d.toString()));
         child.on('error', (e) => {
           clearTimeout(timer);
-          reject(new Error(`Failed to run docker exec mongorestore: ${e.message}`));
+          reject(new Error(`Failed to run mongorestore: ${e.message}`));
         });
         child.on('close', (code) => {
           clearTimeout(timer);
@@ -336,9 +343,16 @@ export class BackupManager {
     let totalBytes = 0;
 
     try {
-      const container = await this.resolveContainer();
-      this.logger.info({ container, targets: targets.length }, 'Starting backup');
-      tmpFile = await this.dumpToTempFile(container);
+      this.logger.info(
+        {
+          host: this.config.mongo.host,
+          port: this.config.mongo.port,
+          database: this.config.mongo.database,
+          targets: targets.length,
+        },
+        'Starting backup'
+      );
+      tmpFile = await this.dumpToTempFile();
       totalBytes = (await fs.promises.stat(tmpFile)).size;
 
       for (const target of targets) {

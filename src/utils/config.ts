@@ -108,9 +108,17 @@ const BackupConfigSchema = z.object({
   pollIntervalMs: z.number().min(5000).default(30000),
   timeoutMs: z.number().min(10000).default(300000),
   filenamePrefix: z.string().default('pos-backup'),
+  // Native MongoDB tooling. The POS installer bundles mongodump/mongorestore
+  // under its install directory; there is no container to exec into any more.
+  //
+  // NOTE on upgrades: an existing config.json still carrying the old
+  // dockerComposeService/containerName keys parses fine - zod strips unknown
+  // keys and applies the defaults below - so a site upgrading from the Docker
+  // build keeps working without a hand-edited config.
   mongo: z.object({
-    dockerComposeService: z.string().default('mongo'),
-    containerName: z.string().optional(),
+    binDir: z.string().default('C:\\Program Files\\XP POS\\mongodb\\bin'),
+    host: z.string().default('127.0.0.1'),
+    port: z.number().int().min(1).max(65535).default(27017),
     database: z.string().default('POS_PROD'),
     gzip: z.boolean().default(true)
   }).default({})

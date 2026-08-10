@@ -153,6 +153,15 @@ export class ApiServer {
           `http://127.0.0.1:${this.config.port}`,
           `http://localhost:${this.config.port}`,
         ];
+
+        if (this.activePort > 0 && this.activePort !== this.config.port) {
+          selfOrigins.push(
+            `http://${this.config.host}:${this.activePort}`,
+            `http://127.0.0.1:${this.activePort}`,
+            `http://localhost:${this.activePort}`
+          );
+        }
+
         if (selfOrigins.includes(origin)) {
           callback(null, true);
           return;
@@ -1200,6 +1209,19 @@ export class ApiServer {
         error: 'Not Found',
         message: 'The requested endpoint does not exist'
       });
+    });
+
+    // CORS rejection handler
+    this.app.use((error: Error, _req: Request, res: Response, next: NextFunction) => {
+      if (error.message === 'Not allowed by CORS') {
+        this.logger.warn({ error: error.message }, 'CORS origin blocked');
+        res.status(403).json({
+          error: 'Forbidden',
+          message: 'Origin not allowed by CORS'
+        });
+        return;
+      }
+      next(error);
     });
 
     // Global error handler

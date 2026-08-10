@@ -155,6 +155,12 @@ export interface ReceiptPayload {
   paymentMethod?: string;
   amountPaid?: number;
   change?: number;
+  /**
+   * One entry per payment taken, in the order taken. `label` is the tenant's
+   * own method name. Printed itemised only when there is more than one; a
+   * single-method order keeps the classic Payment:/Amount Paid:/Change: lines.
+   */
+  payments?: { label: string; amount: number }[];
   customerName?: string;
   tableName?: string;
   serverName?: string;
@@ -491,7 +497,7 @@ export interface LoggingConfig {
  * Connection details the backup subsystem needs. The *policy* (which paths,
  * retention, schedule) is owned by the POS "Server Management" dashboard and
  * pulled from the POS API — this config only says how to reach the POS and the
- * MongoDB running inside Docker on the same box.
+ * MongoDB service running natively on the same box.
  */
 export interface BackupConfig {
   enabled: boolean;
@@ -505,10 +511,18 @@ export interface BackupConfig {
   // Prefix for backup archive filenames written into each path.
   filenamePrefix: string;
   mongo: {
-    // The dump runs via `docker exec` into the compose Mongo container, found
-    // by its compose service label. Set containerName to override discovery.
-    dockerComposeService: string;
-    containerName?: string;
+    // Directory holding mongodump.exe / mongorestore.exe. The XP POS installer
+    // bundles them, so the default points at its install location.
+    //
+    // These used to run as `docker exec <container> mongodump`, discovered by
+    // compose service label. The POS is now a set of native Windows services
+    // with no container to exec into, so we invoke the executables directly.
+    binDir: string;
+    // The POS database binds loopback ONLY and has no authentication - that
+    // bind is the single control keeping it off the LAN. Do not point this at
+    // a routable address without adding auth first.
+    host: string;
+    port: number;
     database: string;
     gzip: boolean;
   };

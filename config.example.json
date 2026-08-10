@@ -43,7 +43,9 @@
     "timeoutMs": 300000,
     "filenamePrefix": "pos-backup",
     "mongo": {
-      "dockerComposeService": "mongo",
+      "binDir": "C:\\Program Files\\XP POS\\mongodb\\bin",
+      "host": "127.0.0.1",
+      "port": 27017,
       "database": "POS_PROD",
       "gzip": true
     }
