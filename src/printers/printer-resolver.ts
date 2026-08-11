@@ -230,7 +230,19 @@ export function classifyStatus(
   const portLive = isUsb ? snapshot.livePorts.includes(printer.portName) : null;
   // Only meaningful for USB: an empty device list with a USB-bound queue means
   // nothing is plugged in. For COM/LAN queues we have no equivalent probe.
-  const devicePresent = isUsb ? snapshot.usbDevices.length > 0 && portLive : null;
+  //
+  // When the host could not probe PnP properly — a damaged WMI repository falls
+  // back to a registry heuristic — absence proves nothing, so presence becomes
+  // "unknown" rather than "no". Reporting a working printer as unplugged on a
+  // weak signal is the worse mistake.
+  const presenceTrustworthy = !snapshot.host?.devicePresenceDegraded;
+  const devicePresent = isUsb
+    ? snapshot.usbDevices.length > 0 && portLive
+      ? true
+      : presenceTrustworthy
+        ? false
+        : null
+    : null;
   const migrated = isUsb && !portLive && snapshot.livePorts.length > 0;
   const suggestedPort = migrated ? pickMigrationPort(printer, snapshot, hints) : undefined;
 

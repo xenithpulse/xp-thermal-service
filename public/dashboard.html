@@ -1297,10 +1297,36 @@ async function rescanDiscover() {
     const printers = d.printers || [];
 
     const s = d.system || {};
-    sys.innerHTML = `Print Spooler: <strong>${s.spoolerRunning ? 'running' : 'stopped'}</strong> &nbsp;·&nbsp; `
+    const host = s.host || {};
+
+    // A damaged WMI repository is a Windows fault, not a printer fault. Say so
+    // plainly, note that printing still works, and give the one command that
+    // fixes it — otherwise the raw "Invalid class" warnings below read as if
+    // the service is broken.
+    const wmiBanner = host.wmiHealthy === false
+      ? `<div style="border:1px solid var(--yellow, #d29922);border-radius:8px;padding:10px 12px;margin-bottom:12px">
+           <div style="font-weight:600;color:var(--yellow, #d29922)">Windows management data (WMI) is damaged on this PC</div>
+           <div style="font-size:12px;margin-top:4px;color:var(--text)">
+             Printers are being read directly from the Print Spooler instead, so detection and printing still work.
+             Some detail (such as paper-out reporting) is unavailable until Windows is repaired.
+           </div>
+           <div style="font-size:11px;color:var(--text-dim);margin-top:6px">
+             To repair, run this in an Administrator Command Prompt, then restart the PC:
+             <code style="font-family:'SF Mono',Monaco,monospace">winmgmt /salvagerepository</code>
+           </div>
+         </div>`
+      : '';
+
+    sys.innerHTML = wmiBanner
+      + `Print Spooler: <strong>${s.spoolerRunning ? 'running' : 'stopped'}</strong> &nbsp;·&nbsp; `
       + `USB printers attached: <strong>${s.attachedUsbDevices ?? 0}</strong>`
       + (s.livePorts && s.livePorts.length ? ` (${s.livePorts.map(esc).join(', ')})` : '')
-      + (s.warnings && s.warnings.length ? `<br><span style="color:var(--red)">${s.warnings.map(esc).join('<br>')}</span>` : '');
+      + (host.osCaption ? ` &nbsp;·&nbsp; ${esc(host.osCaption)}` : '')
+      // The raw warnings are support detail, not headline news.
+      + (s.warnings && s.warnings.length
+          ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px">Technical details</summary>
+             <div style="color:var(--text-dim);font-size:11px;margin-top:4px">${s.warnings.map(esc).join('<br>')}</div></details>`
+          : '');
 
     // Printers that are plugged in but have no driver — the usual reason a
     // freshly imaged machine finds nothing.

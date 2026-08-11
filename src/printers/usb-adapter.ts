@@ -42,6 +42,7 @@ import {
   PrinterIdentityHints
 } from './printer-resolver';
 import { PrinterConfig, PrinterStatus } from '../types';
+import { WINSPOOL_SOURCE } from './winspool';
 import { Logger } from '../utils/logger';
 
 // Max items in write queue to prevent unbounded memory growth
@@ -55,89 +56,10 @@ const HEAL_COOLDOWN_MS = 15000;
 const WRITE_TIMEOUT_MS = 30000;
 
 /**
- * The winspool P/Invoke shim used to push raw ESC/POS bytes at the spooler.
- *
- * Held in one place because it is used twice: compiled once into a cached DLL
- * at startup, and compiled inline as a fallback when that cache is missing.
- * The two must stay identical or the fallback would behave differently from
- * the fast path.
+ * The winspool P/Invoke shim, shared with the enumeration fallback so one
+ * pre-compiled assembly serves both printing and printer discovery.
  */
-const RAW_PRINTER_SOURCE = `
-using System;
-using System.Runtime.InteropServices;
-
-public class RawPrinterHelper
-{
-    [StructLayout(LayoutKind.Sequential)]
-    public struct DOCINFOA
-    {
-        [MarshalAs(UnmanagedType.LPStr)] public string pDocName;
-        [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile;
-        [MarshalAs(UnmanagedType.LPStr)] public string pDatatype;
-    }
-
-    [DllImport("winspool.drv", EntryPoint = "OpenPrinterA", SetLastError = true, CharSet = CharSet.Ansi)]
-    public static extern bool OpenPrinter(string szPrinter, out IntPtr hPrinter, IntPtr pd);
-
-    [DllImport("winspool.drv", EntryPoint = "ClosePrinter", SetLastError = true)]
-    public static extern bool ClosePrinter(IntPtr hPrinter);
-
-    [DllImport("winspool.drv", EntryPoint = "StartDocPrinterA", SetLastError = true, CharSet = CharSet.Ansi)]
-    public static extern bool StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFOA di);
-
-    [DllImport("winspool.drv", EntryPoint = "EndDocPrinter", SetLastError = true)]
-    public static extern bool EndDocPrinter(IntPtr hPrinter);
-
-    [DllImport("winspool.drv", EntryPoint = "StartPagePrinter", SetLastError = true)]
-    public static extern bool StartPagePrinter(IntPtr hPrinter);
-
-    [DllImport("winspool.drv", EntryPoint = "EndPagePrinter", SetLastError = true)]
-    public static extern bool EndPagePrinter(IntPtr hPrinter);
-
-    [DllImport("winspool.drv", EntryPoint = "WritePrinter", SetLastError = true)]
-    public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
-
-    // Returns null on success, or a description of the failing step so the
-    // service can report something more useful than "it did not work".
-    public static string SendBytesToPrinter(string printerName, byte[] bytes)
-    {
-        IntPtr hPrinter;
-        DOCINFOA di = new DOCINFOA();
-        di.pDocName = "XP Thermal Document";
-        di.pDatatype = "RAW";
-
-        if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero))
-            return "OpenPrinter failed (win32 error " + Marshal.GetLastWin32Error() + ")";
-
-        try
-        {
-            if (!StartDocPrinter(hPrinter, 1, ref di))
-                return "StartDocPrinter failed (win32 error " + Marshal.GetLastWin32Error() + ")";
-
-            if (!StartPagePrinter(hPrinter))
-                return "StartPagePrinter failed (win32 error " + Marshal.GetLastWin32Error() + ")";
-
-            int written;
-            bool ok = WritePrinter(hPrinter, bytes, bytes.Length, out written);
-            int err = Marshal.GetLastWin32Error();
-
-            EndPagePrinter(hPrinter);
-            EndDocPrinter(hPrinter);
-
-            if (!ok)
-                return "WritePrinter failed (win32 error " + err + ")";
-            if (written != bytes.Length)
-                return "Short write: " + written + " of " + bytes.Length + " bytes reached the spooler";
-
-            return null;
-        }
-        finally
-        {
-            ClosePrinter(hPrinter);
-        }
-    }
-}
-`.trim();
+const RAW_PRINTER_SOURCE = WINSPOOL_SOURCE;
 
 /**
  * Printer names come from Windows and are only ever passed to PowerShell

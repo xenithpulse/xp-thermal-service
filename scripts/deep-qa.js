@@ -403,7 +403,11 @@ async function suitePrinterState() {
       const reason = p.state.reason || '';
       if (!reason) continue;
       assert(!/^0x[0-9a-f]+$/i.test(reason), `${p.id} reason is a bare code`);
-      assert(reason.length > 12, `${p.id} reason is too terse: "${reason}"`);
+      assert(!/win32 error/i.test(reason), `${p.id} reason leaks a raw win32 code: "${reason}"`);
+      // A healthy printer just says "Ready"; only a problem owes an explanation.
+      if (p.state.status !== 'online') {
+        assert(reason.length > 12, `${p.id} is ${p.state.status} but the reason is too terse: "${reason}"`);
+      }
     }
     return 'all reasons readable';
   });

@@ -43,7 +43,7 @@ const snapshot: WindowsPrintSnapshot = {
   ],
   livePorts: ['USB014'],
   warnings: [],
-  host: { psVersion: 5, osCaption: 'Windows 11', hasPrintManagement: true }
+  host: { psVersion: 5, osCaption: 'Windows 11', hasPrintManagement: true, wmiHealthy: true, devicePresenceDegraded: false }
 };
 
 describe('printer roles', () => {

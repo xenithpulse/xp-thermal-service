@@ -69,7 +69,7 @@ function snapshot(overrides: Partial<WindowsPrintSnapshot> = {}): WindowsPrintSn
       overrides.livePorts ??
       usbDevices.map((d) => d.portName).filter((p): p is string => !!p),
     warnings: [],
-    host: { psVersion: 5, osCaption: 'Windows 11 Pro', hasPrintManagement: true },
+    host: { psVersion: 5, osCaption: 'Windows 11 Pro', hasPrintManagement: true, wmiHealthy: true, devicePresenceDegraded: false },
     ...overrides
   };
 }

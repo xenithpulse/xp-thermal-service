@@ -38,6 +38,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import pino from 'pino';
+import { WINSPOOL_SOURCE } from './winspool';
 import { Logger } from '../utils/logger';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +85,17 @@ export interface HostCapabilities {
   osCaption: string;
   /** Get-Printer / Set-Printer / Get-PrinterPort — Windows 8 and Server 2012+. */
   hasPrintManagement: boolean;
+  /**
+   * False when the WMI repository is damaged (Win32_Printer reports "Invalid
+   * class"). Printer data then comes from the spooler directly, which works,
+   * but some detail is unavailable.
+   */
+  wmiHealthy: boolean;
+  /**
+   * True when USB presence could not be probed properly. Presence is then a
+   * weak signal, so a printer must never be declared unplugged on it alone.
+   */
+  devicePresenceDegraded: boolean;
 }
 
 export interface WindowsPrintSnapshot {
@@ -218,8 +230,22 @@ function Num($v) { $n = 0; if ([int]::TryParse([string]$v, [ref]$n)) { return [s
 # service needs to know which code paths are even available here.
 $psv = 2
 try { $psv = [int]$PSVersionTable.PSVersion.Major } catch { }
+
+# The OS name comes from the registry first: on a machine with a damaged WMI
+# repository the Win32_OperatingSystem class is missing too, and a blank OS in
+# a support report is one more thing nobody can explain later.
 $osCaption = ''
-try { $osCaption = Txt (Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+try {
+  $osCaption = Txt (Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -Name ProductName -ErrorAction Stop).ProductName
+} catch { }
+if (-not $osCaption) {
+  try { $osCaption = Txt (Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+}
+if (-not $osCaption) {
+  try { $osCaption = Txt [System.Environment]::OSVersion.VersionString } catch { }
+}
+
+$emittedAny = $false
 $hasPrintMgmt = '0'
 if (Get-Command Get-Printer -ErrorAction SilentlyContinue) { $hasPrintMgmt = '1' }
 Emit 'V' @((Num $psv), $osCaption, $hasPrintMgmt)
@@ -233,24 +259,104 @@ try {
 Emit 'S' @($spoolerRunning)
 
 # ── Print queues ───────────────────────────────────────────────────────────
-# Get-CimInstance is PowerShell 3.0+; Get-WmiObject covers 2.0.
+# Get-CimInstance is PowerShell 3.0+; Get-WmiObject covers 2.0. If the WMI
+# repository is damaged both fail with 'Invalid class "Win32_Printer"', which
+# has been seen in the field, so a third path talks to the spooler directly.
 $raw = @()
+$wmiOk = $false
+# Support switch: set XP_FORCE_SPOOLER_FALLBACK=1 to exercise the no-WMI path
+# on a healthy machine, so the fallback can be tested without breaking anything.
+$forceFallback = ($env:XP_FORCE_SPOOLER_FALLBACK -eq '1')
 try {
+  if ($forceFallback) { throw 'forced' }
   $raw = @(Get-CimInstance -ClassName Win32_Printer -ErrorAction Stop)
+  $wmiOk = $true
 } catch {
-  try { $raw = @(Get-WmiObject -Class Win32_Printer -ErrorAction Stop) }
-  catch { Warn "Could not enumerate printers: $($_.Exception.Message)" }
+  try {
+    if ($forceFallback) { throw 'forced' }
+    $raw = @(Get-WmiObject -Class Win32_Printer -ErrorAction Stop)
+    $wmiOk = $true
+  } catch {
+    Warn "WMI could not enumerate printers ($($_.Exception.Message)); using the spooler directly."
+  }
 }
 
-foreach ($p in $raw) {
-  if (-not $p) { continue }
-  Emit 'P' @(
-    (Txt $p.Name), (Txt $p.PortName), (Txt $p.DriverName),
-    (Bit $p.Shared), (Txt $p.ShareName), (Bit $p.WorkOffline),
-    (Num $p.PrinterStatus), (Num $p.PrinterState),
-    (Num $p.DetectedErrorState), (Num $p.ExtendedPrinterStatus),
-    (Bit $p.Default), (Bit $p.Local), (Bit $p.Network)
-  )
+if ($wmiOk) {
+  foreach ($p in $raw) {
+    if (-not $p) { continue }
+    Emit 'P' @(
+      (Txt $p.Name), (Txt $p.PortName), (Txt $p.DriverName),
+      (Bit $p.Shared), (Txt $p.ShareName), (Bit $p.WorkOffline),
+      (Num $p.PrinterStatus), (Num $p.PrinterState),
+      (Num $p.DetectedErrorState), (Num $p.ExtendedPrinterStatus),
+      (Bit $p.Default), (Bit $p.Local), (Bit $p.Network)
+    )
+  }
+} else {
+  # winspool fallback. PRINTER_INFO_2.Status uses the same bit values as
+  # Win32_Printer.PrinterState, and Attributes carries the WorkOffline flag,
+  # so the classifier upstream needs no special handling.
+  Emit 'X' @('wmi-unavailable')
+  try {
+    $helper = $env:XP_HELPER_DLL
+    $loaded = $false
+    if ($helper -and (Test-Path $helper)) {
+      try { Add-Type -Path $helper -ErrorAction Stop; $loaded = $true } catch { }
+    }
+    if (-not $loaded) {
+      Add-Type -TypeDefinition @"
+${WINSPOOL_SOURCE}
+"@ -Language CSharp -ErrorAction Stop
+    }
+
+    foreach ($line in [PrinterEnum]::ListPrinters()) {
+      if (-not $line) { continue }
+      $f = $line -split '\\|'
+      if ($f[0] -eq 'ERR') { Warn "Spooler enumeration failed (win32 error $($f[1]))"; continue }
+      $emittedAny = $true
+
+      $attr = 0; [void][int]::TryParse($f[3], [ref]$attr)
+      $status = 0; [void][int]::TryParse($f[4], [ref]$status)
+
+      $isDefault = 0; if ($attr -band 0x4)   { $isDefault = 1 }
+      $isShared  = 0; if ($attr -band 0x8)   { $isShared = 1 }
+      $isNetwork = 0; if ($attr -band 0x10)  { $isNetwork = 1 }
+      $isLocal   = 0; if ($attr -band 0x40)  { $isLocal = 1 }
+      $offline   = 0; if ($attr -band 0x400) { $offline = 1 }
+
+      Emit 'P' @(
+        (Txt $f[0]), (Txt $f[1]), (Txt $f[2]),
+        $isShared, (Txt $f[6]), $offline,
+        '0', (Num $status),
+        '0', '0',
+        $isDefault, $isLocal, $isNetwork
+      )
+    }
+  } catch {
+    Warn "Spooler enumeration was unavailable ($($_.Exception.Message)); trying Get-Printer."
+  }
+
+  # Last resort. Get-Printer lives in root\\standardcimv2, a different namespace
+  # from the damaged one, and needs no runtime compilation — so it can work
+  # where both cimv2 and Add-Type are unavailable. It cannot report WorkOffline,
+  # which is fine: that flag is never trusted on its own anyway.
+  if (-not $emittedAny) {
+    try {
+      foreach ($p in @(Get-Printer -ErrorAction Stop)) {
+        $st = 0
+        if ($p.PrinterStatus -ne $null) { [void][int]::TryParse([string][int]$p.PrinterStatus, [ref]$st) }
+        $isNet = 0; if ($p.Type -eq 'Connection') { $isNet = 1 }
+        Emit 'P' @(
+          (Txt $p.Name), (Txt $p.PortName), (Txt $p.DriverName),
+          (Bit $p.Shared), (Txt $p.ShareName), '0',
+          '0', '0', '0', '0',
+          '0', (Bit ($isNet -eq 0)), $isNet
+        )
+      }
+    } catch {
+      Warn "Could not enumerate printers by any method: $($_.Exception.Message)"
+    }
+  }
 }
 
 # ── Ports ──────────────────────────────────────────────────────────────────
@@ -277,11 +383,53 @@ try {
 # here is genuinely plugged in and powered on. This is the liveness signal that
 # distinguishes "cable moved to another socket" from "printer switched off".
 $devs = @()
+$pnpOk = $false
 try {
+  if ($forceFallback) { throw 'forced' }
   $devs = @(Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPDeviceID LIKE 'USBPRINT%'" -ErrorAction Stop)
+  $pnpOk = $true
 } catch {
-  try { $devs = @(Get-WmiObject -Class Win32_PnPEntity -Filter "PNPDeviceID LIKE 'USBPRINT%'" -ErrorAction Stop) }
-  catch { Warn "Could not enumerate USB printing devices: $($_.Exception.Message)" }
+  try {
+    if ($forceFallback) { throw 'forced' }
+    $devs = @(Get-WmiObject -Class Win32_PnPEntity -Filter "PNPDeviceID LIKE 'USBPRINT%'" -ErrorAction Stop)
+    $pnpOk = $true
+  } catch {
+    Warn "WMI could not enumerate USB printing devices ($($_.Exception.Message)); using the registry."
+  }
+}
+
+# Registry fallback for a damaged WMI repository. PnP creates a volatile
+# 'Control' subkey for a device that is started, so its presence distinguishes
+# an attached printer from the stale instance left behind by every previous
+# USB socket. Emitted with a marker so the service knows presence is a weaker
+# signal here and stays optimistic rather than declaring printers unplugged.
+if (-not $pnpOk) {
+  Emit 'X' @('pnp-registry-fallback')
+  try {
+    foreach ($hw in @(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USBPRINT' -ErrorAction Stop)) {
+      foreach ($inst in @(Get-ChildItem $hw.PSPath -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path (Join-Path $inst.PSPath 'Control'))) { continue }
+
+        $port = $null
+        try {
+          $port = (Get-ItemProperty (Join-Path $inst.PSPath 'Device Parameters') -Name PortName -ErrorAction Stop).PortName
+        } catch { }
+
+        $name = ''
+        try { $name = (Get-ItemProperty $inst.PSPath -Name FriendlyName -ErrorAction Stop).FriendlyName } catch { }
+        if (-not $name) {
+          try { $name = (Get-ItemProperty $inst.PSPath -Name DeviceDesc -ErrorAction Stop).DeviceDesc } catch { }
+        }
+
+        Emit 'D' @(
+          (Txt ($hw.PSChildName + '\\' + $inst.PSChildName)),
+          (Txt $name), (Txt $port), 'OK', (Txt $hw.PSChildName)
+        )
+      }
+    }
+  } catch {
+    Warn "Could not read USB printer devices from the registry: $($_.Exception.Message)"
+  }
 }
 # Vendor stacks that enumerate outside USBPRINT but still bind usbprint.sys.
 try {
@@ -376,7 +524,7 @@ export class WindowsPrintSystem {
       usbDevices: [],
       livePorts: [],
       warnings: [],
-      host: { psVersion: 0, osCaption: '', hasPrintManagement: false }
+      host: { psVersion: 0, osCaption: '', hasPrintManagement: false, wmiHealthy: true, devicePresenceDegraded: false }
     });
 
     if (process.platform !== 'win32') {
@@ -697,7 +845,7 @@ export function parseSnapshot(stdout: string): {
     usbDevices: [],
     livePorts: [],
     warnings: [],
-    host: { psVersion: 0, osCaption: '', hasPrintManagement: false }
+    host: { psVersion: 0, osCaption: '', hasPrintManagement: false, wmiHealthy: true, devicePresenceDegraded: false }
   };
 
   let complete = false;
@@ -713,6 +861,7 @@ export function parseSnapshot(stdout: string): {
     switch (kind) {
       case 'V':
         snapshot.host = {
+          ...snapshot.host,
           psVersion: toInt(f(1)),
           osCaption: f(2),
           hasPrintManagement: f(3) === '1'
@@ -763,6 +912,16 @@ export function parseSnapshot(stdout: string): {
 
       case 'W':
         if (f(1)) snapshot.warnings.push(f(1));
+        break;
+
+      // Degraded-mode markers: the data is still usable, but it came from a
+      // fallback and some of it is weaker than usual.
+      case 'X':
+        if (f(1) === 'wmi-unavailable') {
+          snapshot.host.wmiHealthy = false;
+        } else if (f(1) === 'pnp-registry-fallback') {
+          snapshot.host.devicePresenceDegraded = true;
+        }
         break;
 
       case 'Z':
