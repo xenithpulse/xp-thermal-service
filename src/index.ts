@@ -10,6 +10,7 @@ import { EventEmitter } from 'events';
 import { ConfigManager } from './utils/config';
 import { createLogger, Logger } from './utils/logger';
 import { PrinterManager } from './printers/printer-manager';
+import { USBPrinterAdapter } from './printers/usb-adapter';
 import { JobStore } from './queue/job-store';
 import { JobQueue } from './queue/job-queue';
 import { JobProcessor } from './queue/processor';
@@ -17,6 +18,7 @@ import { TemplateEngine } from './templates/engine';
 import { ApiServer } from './api/server';
 import { BackupManager } from './backup/backup-manager';
 import { BackupScheduler } from './backup/backup-scheduler';
+import { InstanceLock } from './utils/instance-lock';
 import { ServiceEvent } from './types';
 
 export class ThermalPrintService extends EventEmitter {
@@ -32,6 +34,8 @@ export class ThermalPrintService extends EventEmitter {
   private backupScheduler!: BackupScheduler;
   private isRunning = false;
   private shutdownPromise: Promise<void> | null = null;
+  /** Invoked as soon as shutdown begins, before any draining. */
+  onStopping?: () => void;
 
   constructor(configPath?: string) {
     super();
@@ -75,12 +79,18 @@ export class ThermalPrintService extends EventEmitter {
     this.jobQueue = new JobQueue(this.jobStore, queueConfig, this.logger);
     this.logger.info('Job queue initialized');
 
-    // Initialize printer manager
+    // Initialize printer manager. Runtime discoveries (a printer that moved to
+    // another USB port, a queue that was renamed) are written straight back to
+    // config.json so the service does not have to re-learn them after a restart.
     this.printerManager = new PrinterManager(
       {
         printers: config.printers,
         autoConnect: true,
-        healthCheckInterval: 30000
+        healthCheckInterval: 30000,
+        autoHeal: true,
+        persistPrinterUpdate: (printerId, updates) => {
+          this.config.updatePrinter(printerId, updates);
+        }
       },
       this.logger
     );
@@ -133,7 +143,10 @@ export class ThermalPrintService extends EventEmitter {
         host: serverConfig.host,
         port: serverConfig.port,
         security: securityConfig,
-        configManager: this.config
+        configManager: this.config,
+        onRestartRequested: (reason) => {
+          void this.restart(reason);
+        }
       },
       this.logger
     );
@@ -164,6 +177,11 @@ export class ThermalPrintService extends EventEmitter {
 
       // Ensure job store is fully initialized before accepting requests
       await this.jobStore.waitForInit();
+
+      // Build the raw-printing helper once now, rather than paying ~600ms of
+      // C# compilation on every receipt. Best-effort: printing falls back to
+      // compiling inline if this cannot run here.
+      await USBPrinterAdapter.prepareHelperAssembly(this.logger).catch(() => null);
 
       // Start the API server (smart port handling)
       await this.apiServer.start();
@@ -218,6 +236,11 @@ export class ThermalPrintService extends EventEmitter {
   private async doStop(): Promise<void> {
     this.logger.info('Stopping XP Thermal Service...');
 
+    // Hand the instance lock over immediately. We are leaving regardless, and
+    // draining can take tens of seconds; holding the lock through that would
+    // make our own replacement wait, or fail, on every restart.
+    this.onStopping?.();
+
     try {
       // Stop the backup scheduler
       this.backupScheduler?.stop();
@@ -263,47 +286,147 @@ export class ThermalPrintService extends EventEmitter {
    * This allows other applications to find the service even if it's running on a non-default port.
    */
   private writeActivePortFile(port: number): void {
-    try {
-      const cwd = process.cwd();
-      const portStr = port.toString();
+    const portStr = port.toString();
+    const written: string[] = [];
 
-      // Write to data/ subdirectory
-      const dataPortFile = path.join(cwd, 'data', 'active_port.txt');
-      const portDir = path.dirname(dataPortFile);
-      if (!fs.existsSync(portDir)) {
-        fs.mkdirSync(portDir, { recursive: true });
+    // A machine-readable descriptor, so a client that finds the file knows what
+    // it is looking at and can sanity-check it against the running service.
+    const descriptor = JSON.stringify(
+      {
+        service: 'xp-thermal-service',
+        port,
+        host: this.config.getServerConfig().host,
+        baseUrl: `http://127.0.0.1:${port}`,
+        configuredPort: this.config.getServerConfig().port,
+        pid: process.pid,
+        startedAt: new Date().toISOString()
+      },
+      null,
+      2
+    );
+
+    for (const target of this.getPortFileTargets()) {
+      try {
+        const dir = path.dirname(target);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(target, target.endsWith('.json') ? descriptor : portStr, 'utf8');
+        written.push(target);
+      } catch {
+        // A single unwritable location must not stop the others.
       }
-      fs.writeFileSync(dataPortFile, portStr, 'utf8');
-
-      // Also write to root of install directory for easy external discovery
-      const rootPortFile = path.join(cwd, 'active_port.txt');
-      fs.writeFileSync(rootPortFile, portStr, 'utf8');
-      
-      this.logger.debug({ dataPortFile, rootPortFile, port }, 'Active port files written');
-    } catch (error) {
-      this.logger.warn({ error }, 'Failed to write active port file');
     }
+
+    if (written.length === 0) {
+      this.logger.warn('Failed to write any active port file');
+    } else {
+      this.logger.debug({ written, port }, 'Active port files written');
+    }
+  }
+
+  /**
+   * Where to publish the active port.
+   *
+   * The install directory is the historical location, but a client only finds
+   * it if it already knows where the service was installed. ProgramData is a
+   * fixed, machine-wide path that any POS build can read without configuration,
+   * which matters because the service may fall back to a non-default port.
+   */
+  private getPortFileTargets(): string[] {
+    const cwd = process.cwd();
+    const targets = [
+      path.join(cwd, 'data', 'active_port.txt'),
+      path.join(cwd, 'active_port.txt'),
+      path.join(cwd, 'data', 'service-endpoint.json')
+    ];
+
+    const programData = process.env.ProgramData || process.env.ALLUSERSPROFILE;
+    if (programData) {
+      targets.push(
+        path.join(programData, 'XPThermalService', 'active_port.txt'),
+        path.join(programData, 'XPThermalService', 'service-endpoint.json')
+      );
+    }
+
+    return targets;
   }
 
   /**
    * Remove active port files on shutdown to prevent stale port references.
    */
   private cleanActivePortFile(): void {
-    try {
-      const cwd = process.cwd();
-      const files = [
-        path.join(cwd, 'data', 'active_port.txt'),
-        path.join(cwd, 'active_port.txt'),
-      ];
-      for (const file of files) {
+    for (const file of this.getPortFileTargets()) {
+      try {
         if (fs.existsSync(file)) {
           fs.unlinkSync(file);
         }
+      } catch {
+        // Best effort — a leftover file is harmless because clients verify
+        // against /health before trusting it.
       }
-      this.logger.debug('Active port files cleaned up');
-    } catch (error) {
-      this.logger.warn({ error }, 'Failed to clean active port files');
     }
+    this.logger.debug('Active port files cleaned up');
+  }
+
+  /**
+   * Write anything held only in memory to disk, right now.
+   *
+   * The job store batches saves on a 5-second timer, so a job that was accepted
+   * and acknowledged to the POS can still be memory-only when the process dies.
+   * This is synchronous and deliberately cheap so it can be called from an
+   * uncaught-exception handler, where the process may have seconds to live and
+   * async work may never complete.
+   */
+  flushPersistence(): void {
+    try {
+      this.jobQueue?.flush();
+    } catch (error) {
+      // Last-ditch path: never throw on the way out.
+      console.error('[FLUSH] Could not flush the job store:', error);
+    }
+  }
+
+  /**
+   * Stop cleanly and exit so the service wrapper restarts us.
+   *
+   * Used by the restart API and the health watchdog. Goes through the full
+   * shutdown — pause intake, let in-flight receipts finish, flush, close — so a
+   * restart never truncates a print that is already on its way to the printer.
+   */
+  async restart(reason: string): Promise<void> {
+    this.logger.warn({ reason }, 'Restarting service');
+    console.warn(`[RESTART] ${reason} — draining work before exit`);
+
+    // A restart must be quick. The service wrapper does not start the
+    // replacement until this process has actually exited, so every second spent
+    // shutting down is a second the till cannot print — and a slow shutdown
+    // repeated a few times can exhaust the wrapper's restart budget and leave
+    // the service down entirely.
+    //
+    // A receipt takes about a second to finish, so this window drains the
+    // realistic cases and abandons the rest rather than hanging on a wedged
+    // socket or an unresponsive spooler.
+    const RESTART_DRAIN_MS = 8000;
+
+    const drained = await Promise.race([
+      this.stop().then(
+        () => true,
+        (error) => {
+          this.logger.error({ error }, 'Shutdown failed during restart');
+          return false;
+        }
+      ),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), RESTART_DRAIN_MS))
+    ]);
+
+    if (!drained) {
+      console.warn('[RESTART] Drain did not finish in time — flushing and exiting now');
+      this.flushPersistence();
+    }
+
+    // Non-zero so the node-windows wrapper treats it as a crash and respawns.
+    process.exit(1);
   }
 
   /**
@@ -445,9 +568,29 @@ For more information, see the documentation.
     configPath = process.env.XP_CONFIG_PATH;
   }
 
+  // Refuse to run alongside another instance. The port fallback means a second
+  // copy would start "successfully" on the next free port and then fight the
+  // first over config.json, silently dropping printers.
+  const lock = new InstanceLock();
+  const lockResult = await lock.acquire();
+
+  if (!lockResult.acquired) {
+    console.error(`\nFATAL: ${lockResult.reason}\n`);
+    process.exit(4);
+  }
+  if (lockResult.reason && !lockResult.reason.startsWith('Instance lock acquired.')) {
+    console.warn(`[LOCK] ${lockResult.reason}`);
+  }
+
   // Create and start service
   const service = new ThermalPrintService(configPath);
   let isShuttingDown = false;
+
+  // Release as soon as we start going down, so the replacement process can
+  // claim the lock while this one drains. The exit hook is the backstop for
+  // routes that never reach shutdown().
+  service.onStopping = () => lock.release();
+  process.on('exit', () => lock.release());
 
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {
@@ -491,16 +634,20 @@ For more information, see the documentation.
     });
   }
 
-  // Handle uncaught errors — log and exit, let service manager restart
+  // Handle uncaught errors — log and exit, let service manager restart.
+  // The process may be in an unreliable state, so persistence is flushed
+  // synchronously and immediately rather than via the async shutdown path,
+  // which might never complete. Losing an acknowledged receipt is worse than
+  // an inelegant exit.
   process.on('uncaughtException', (error) => {
     console.error('FATAL: Uncaught exception:', error);
-    // Give time for logs to flush
+    service.flushPersistence();
     setTimeout(() => process.exit(1), 1000);
   });
 
   process.on('unhandledRejection', (reason, promise) => {
     console.error('FATAL: Unhandled rejection at:', promise, 'reason:', reason);
-    // Give time for logs to flush
+    service.flushPersistence();
     setTimeout(() => process.exit(1), 1000);
   });
 
@@ -592,8 +739,9 @@ For more information, see the documentation.
 
       if (consecutiveHealthFailures >= PRODUCTION_CONFIG.maxHealthFailures) {
         console.error(`[WATCHDOG] ${consecutiveHealthFailures} consecutive health failures. Restarting process to recover...`);
-        // Exit with code 1 — node-windows will auto-restart the service
-        process.exit(1);
+        stopHealthMonitoring();
+        // Drain and flush on the way out; the wrapper respawns on exit code 1.
+        void service.restart(`${consecutiveHealthFailures} consecutive health check failures`);
       }
     }, PRODUCTION_CONFIG.selfHealthCheckIntervalMs);
 
@@ -713,7 +861,8 @@ For more information, see the documentation.
 
   try {
     await service.start();
-    
+    lock.updatePort(service.getActivePort());
+
     // Start health monitoring in production
     if (isService || process.env.NODE_ENV === 'production') {
       startHealthMonitoring();

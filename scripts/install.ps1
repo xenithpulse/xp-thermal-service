@@ -929,6 +929,22 @@ function Set-PowerManagement {
     } catch {
         Write-Log "Could not set power request override (non-fatal): $_" "WARNING"
     }
+
+    # Start only after the Print Spooler. Delayed auto-start usually gets us
+    # there anyway, but "usually" is not good enough across a fleet: without the
+    # dependency the service can come up first on a fast machine, find no
+    # printers, and report everything offline until the next health check.
+    try {
+        sc.exe config $ServiceName depend= Spooler 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-OK "Service now depends on the Print Spooler"
+            Write-Log "Service dependency on Spooler configured" "SUCCESS"
+        } else {
+            Write-Log "Could not set Spooler dependency (exit $LASTEXITCODE, non-fatal)" "WARNING"
+        }
+    } catch {
+        Write-Log "Could not set Spooler dependency (non-fatal): $_" "WARNING"
+    }
 }
 
 # ─── Icon assets, shortcuts, Add/Remove Programs entry ──────────────

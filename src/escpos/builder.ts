@@ -70,7 +70,7 @@ export const Commands = {
   LINE_SPACING_DEFAULT: [ESC, 0x32],
   LINE_SPACING_SET: [ESC, 0x33], // + n
   
-  // Cash drawer
+  // Cash drawer — default pulse: 50ms on, 500ms off
   CASH_DRAWER_PIN2: [ESC, 0x70, 0x00, 0x19, 0xFA],
   CASH_DRAWER_PIN5: [ESC, 0x70, 0x01, 0x19, 0xFA],
   
@@ -103,6 +103,29 @@ export const Commands = {
   // Density/Print density
   DENSITY: [GS, 0x7C], // + n
 } as const;
+
+/**
+ * Build a cash drawer pulse: ESC p m t1 t2
+ *
+ * t1 and t2 are expressed in 2ms units in a single byte, so the achievable
+ * range is 0–510ms; values outside it are clamped rather than silently
+ * wrapping, which would produce a pulse far shorter than intended.
+ *
+ * A drawer that does not open is usually asking for a longer pulse (some need
+ * 100ms+), and a few printers wire the drawer to pin 5 instead of pin 2.
+ */
+export function cashDrawerPulse(
+  pin: 2 | 5 = 2,
+  onTimeMs = 50,
+  offTimeMs = 500
+): number[] {
+  const toUnits = (ms: number): number => {
+    if (!Number.isFinite(ms)) return 25;
+    return Math.max(1, Math.min(255, Math.round(ms / 2)));
+  };
+
+  return [ESC, 0x70, pin === 5 ? 0x01 : 0x00, toUnits(onTimeMs), toUnits(offTimeMs)];
+}
 
 /**
  * Code page mappings
@@ -537,17 +560,12 @@ export class EscPosBuilder {
   /**
    * Open cash drawer
    */
-  openCashDrawer(pin: 2 | 5 = 2): this {
+  openCashDrawer(pin: 2 | 5 = 2, onTimeMs?: number, offTimeMs?: number): this {
     if (!this.capabilities.supportsCashDrawer) {
       return this;
     }
 
-    if (pin === 5) {
-      this.buffer.push(...Commands.CASH_DRAWER_PIN5);
-    } else {
-      this.buffer.push(...Commands.CASH_DRAWER_PIN2);
-    }
-
+    this.buffer.push(...cashDrawerPulse(pin, onTimeMs, offTimeMs));
     return this;
   }
 

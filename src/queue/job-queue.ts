@@ -404,6 +404,17 @@ export class JobQueue extends EventEmitter {
   /**
    * Close the queue
    */
+  /**
+   * Write pending changes to disk immediately.
+   *
+   * The store batches saves on a timer, so anything accepted since the last
+   * tick exists only in memory. Call this before the process exits by any route
+   * that is not a clean shutdown, or acknowledged jobs are lost.
+   */
+  flush(): void {
+    this.store.flush();
+  }
+
   close(): void {
     this.store.close();
     this.removeAllListeners();

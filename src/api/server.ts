@@ -18,7 +18,11 @@ import { JobProcessor } from '../queue/processor';
 import { ConfigManager } from '../utils/config';
 import type { BackupScheduler } from '../backup/backup-scheduler';
 import { USBPrinterAdapter } from '../printers/usb-adapter';
-import { Commands } from '../escpos/builder';
+import { PrinterDiscovery } from '../printers/discovery';
+import { buildRoleConfig, isPrinterRole, listRoles } from '../printers/printer-roles';
+import { findByName } from '../printers/windows-printers';
+import { OriginPolicy } from './origin-policy';
+import { cashDrawerPulse } from '../escpos/builder';
 import {
   PrintRequest,
   PrintResponse,
@@ -49,6 +53,12 @@ export interface ApiServerConfig {
   port: number;
   security: SecurityConfig;
   configManager: ConfigManager;
+  /**
+   * Perform a graceful restart. Supplied by the service so the API does not
+   * have to know how to drain the queue; without it the endpoint falls back to
+   * an immediate exit, which can truncate an in-flight receipt.
+   */
+  onRestartRequested?: (reason: string) => void;
 }
 
 // Production server configuration
@@ -77,6 +87,8 @@ export class ApiServer {
   private activeConnections: Set<import('net').Socket> = new Set();
   private isShuttingDown: boolean = false;
   private backupScheduler: BackupScheduler | null = null;
+  private originPolicy: OriginPolicy;
+  private discovery: PrinterDiscovery;
 
   constructor(
     queue: JobQueue,
@@ -90,6 +102,12 @@ export class ApiServer {
     this.processor = processor;
     this.config = config;
     this.logger = logger;
+
+    this.originPolicy = new OriginPolicy({
+      allowedOrigins: config.security.allowedOrigins,
+      allowPrivateNetwork: config.security.allowPrivateNetwork !== false
+    });
+    this.discovery = new PrinterDiscovery(logger, printerManager.getPrintSystem());
 
     // Initialize rate limiter with burst support
     this.rateLimiter = new RateLimiterMemory({
@@ -137,54 +155,53 @@ export class ApiServer {
       next();
     });
 
-    // CORS configuration — checks are dynamic so config updates apply immediately
+    // CORS. The policy is consulted per request, so config changes made through
+    // the dashboard apply immediately, and loopback callers are trusted on every
+    // port — which is what keeps the dashboard working when the service falls
+    // back from its configured port to the next free one.
     this.app.use(cors({
       origin: (origin, callback) => {
-        // Allow requests with no origin (e.g., server-to-server, same-origin fetch)
-        if (!origin) {
-          callback(null, true);
+        const decision = this.originPolicy.check(origin ?? undefined);
+
+        if (decision.allowed) {
+          // Reflect the caller's origin rather than "*", so credentialed
+          // requests keep working.
+          callback(null, origin ? [origin] : true);
           return;
         }
 
-        // Always allow the service's own origin (dashboard served from same host)
-        const selfOrigin = `http://${this.config.host}:${this.config.port}`;
-        const selfOrigins = [
-          selfOrigin,
-          `http://127.0.0.1:${this.config.port}`,
-          `http://localhost:${this.config.port}`,
-        ];
-
-        if (this.activePort > 0 && this.activePort !== this.config.port) {
-          selfOrigins.push(
-            `http://${this.config.host}:${this.activePort}`,
-            `http://127.0.0.1:${this.activePort}`,
-            `http://localhost:${this.activePort}`
-          );
-        }
-
-        if (selfOrigins.includes(origin)) {
-          callback(null, true);
-          return;
-        }
-
-        const origins = this.config.security.allowedOrigins;
-        if (origins.includes('*')) {
-          // Wildcard: allow all origins but without reflecting the specific origin
-          callback(null, '*');
-        } else if (origins.includes(origin)) {
-          callback(null, true);
-        } else {
-          callback(new Error('Not allowed by CORS'));
-        }
+        // Never hand cors an Error: that turns into an opaque 500 from the
+        // error handler and hides the real reason. Withholding the headers is
+        // enough for the browser to block the response, and the guard below
+        // turns it into an explanatory 403.
+        this.logger.warn({ origin, reason: decision.reason }, 'CORS origin rejected');
+        callback(null, false);
       },
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key', 'X-API-Key'],
-      // Only send credentials when origins are explicitly listed (not wildcard)
-      credentials: !this.config.security.allowedOrigins.includes('*'),
-      // Ensure preflight is handled properly
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Idempotency-Key',
+        'X-API-Key',
+        'X-Requested-With'
+      ],
+      exposedHeaders: ['X-Service-Port', 'Retry-After'],
+      credentials: true,
       preflightContinue: false,
       optionsSuccessStatus: 204
     }));
+
+    // Advertise the port we actually ended up on, so a client that found us by
+    // scanning can confirm it and cache the result.
+    this.app.use((_req: Request, res: Response, next: NextFunction) => {
+      res.setHeader('X-Service-Port', String(this.activePort || this.config.port));
+      next();
+    });
+
+    // Reject disallowed cross-origin requests explicitly, with a message that
+    // says how to fix it. Without this the request would still execute and only
+    // the response would be hidden from the caller.
+    this.app.use(this.enforceOrigin.bind(this));
 
     // Body parsing with size limit
     this.app.use(express.json({ 
@@ -219,14 +236,46 @@ export class ApiServer {
     this.app.use(this.rateLimit.bind(this));
   }
 
+  /**
+   * Block cross-origin requests the policy rejected, and explain why.
+   *
+   * The cors middleware only decides whether to *emit* the response headers; it
+   * does not stop the handler running. Preflights are let through untouched so
+   * the browser gets its (header-free) 204 and reports a clean CORS error
+   * rather than a confusing 403.
+   */
+  private enforceOrigin(req: Request, res: Response, next: NextFunction): void {
+    if (req.method === 'OPTIONS') {
+      return next();
+    }
+
+    const origin = req.get('origin');
+    if (!origin) {
+      return next();
+    }
+
+    const decision = this.originPolicy.check(origin);
+    if (decision.allowed) {
+      return next();
+    }
+
+    res.status(403).json({
+      error: 'Forbidden',
+      message: decision.reason,
+      origin
+    });
+  }
+
   private validateHost(req: Request, res: Response, next: NextFunction): void {
     const host = req.hostname || req.get('host')?.split(':')[0];
-    
-    if (!host || !this.config.security.allowedHosts.includes(host)) {
-      this.logger.warn({ host }, 'Blocked request from unauthorized host');
+
+    const decision = this.originPolicy.checkHost(host, this.config.security.allowedHosts);
+
+    if (!decision.allowed) {
+      this.logger.warn({ host, reason: decision.reason }, 'Blocked request from unauthorized host');
       res.status(403).json({
         error: 'Forbidden',
-        message: 'Access denied from this host'
+        message: decision.reason
       });
       return;
     }
@@ -254,7 +303,13 @@ export class ApiServer {
   private requestTimeout(req: Request, res: Response, next: NextFunction): void {
     // Skip timeout for streaming endpoints and long-running restore (mongorestore
     // of a full DB can exceed the default request timeout).
-    if (req.path === '/api/logs/stream' || req.path === '/api/backup/restore') {
+    // Streaming endpoints stay open by design, and a full database restore can
+    // legitimately outlast the normal request budget.
+    if (
+      req.path === '/api/logs/stream' ||
+      req.path === '/api/events' ||
+      req.path === '/api/backup/restore'
+    ) {
       return next();
     }
 
@@ -283,8 +338,13 @@ export class ApiServer {
       return next();
     }
 
-    const apiKey = req.get('X-API-Key');
-    
+    // EventSource cannot set request headers, so the stream endpoint also
+    // accepts the key as a query parameter. Same value, same check — it only
+    // ever travels over loopback or the local network.
+    const apiKey =
+      req.get('X-API-Key') ||
+      (req.path === '/api/events' && typeof req.query.key === 'string' ? req.query.key : undefined);
+
     if (!apiKey || apiKey !== this.config.security.apiKey) {
       this.logger.warn('Invalid or missing API key');
       res.status(401).json({
@@ -301,8 +361,9 @@ export class ApiServer {
    * Rate limiting with burst protection
    */
   private async rateLimit(req: Request, res: Response, next: NextFunction): Promise<void> {
-    // Skip rate limiting for health checks
-    if (req.path === '/health' || req.path === '/api/health') {
+    // Skip rate limiting for health checks and the long-lived event stream,
+    // which is one connection held open rather than repeated requests.
+    if (req.path === '/health' || req.path === '/api/health' || req.path === '/api/events') {
       return next();
     }
 
@@ -358,11 +419,28 @@ export class ApiServer {
 
     // Printer endpoints
     this.app.get('/api/printers', this.handleListPrinters.bind(this));
+
+    // Discovery and setup. These must be registered before the /:printerId
+    // routes below, otherwise Express matches "discover" as a printer id.
+    this.app.get('/api/printers/discover', this.handleDiscoverPrinters.bind(this));
+    this.app.get('/api/printers/roles', this.handleListRoles.bind(this));
+    this.app.post('/api/printers/setup', this.handleSetupPrinterByRole.bind(this));
+    this.app.post('/api/printers/auto-setup', this.handleAutoSetupPrinters.bind(this));
+
     this.app.get('/api/printers/:printerId', this.handleGetPrinter.bind(this));
     this.app.get('/api/printers/:printerId/status', this.handleGetPrinterStatus.bind(this));
     this.app.post('/api/printers/:printerId/test', this.handleTestPrinter.bind(this));
     this.app.post('/api/printers/:printerId/reconnect', this.handleReconnectPrinter.bind(this));
     this.app.post('/api/printers/:printerId/cash-drawer', this.handleOpenCashDrawer.bind(this));
+
+    // Diagnosis and self-repair
+    this.app.get('/api/printers/:printerId/diagnose', this.handleDiagnosePrinter.bind(this));
+    this.app.post('/api/printers/:printerId/repair', this.handleRepairPrinter.bind(this));
+    this.app.get('/api/system/print-system', this.handlePrintSystemSnapshot.bind(this));
+
+    // Live push channel so the dashboard reflects a plug or unplug immediately
+    // instead of on its next poll.
+    this.app.get('/api/events', this.handleEventStream.bind(this));
 
     // Queue management
     this.app.get('/api/queue/stats', this.handleQueueStats.bind(this));
@@ -421,7 +499,14 @@ export class ApiServer {
         }
       };
 
-      res.status(200).json(response);
+      // Identity and port, so a client scanning 9100–9109 can confirm it found
+      // this service rather than something else listening on the same port.
+      res.status(200).json({
+        ...response,
+        service: 'xp-thermal-service',
+        port: this.activePort || this.config.port,
+        configuredPort: this.config.port
+      });
     } catch (error) {
       // Native module crash (e.g. better-sqlite3 "memory access out of bounds")
       // Return degraded status so the watchdog can detect and restart the process
@@ -660,8 +745,25 @@ export class ApiServer {
   private async handleGetPrinterStatus(req: Request, res: Response): Promise<void> {
     try {
       const { printerId } = req.params;
+
+      // Without this, an unknown printer reported "unknown" with HTTP 200,
+      // which reads as a working printer in a bad mood rather than a typo.
+      if (!this.printerManager.getPrinter(printerId)) {
+        throw new PrintServiceError(
+          `Printer not found: ${printerId}`,
+          ErrorCodes.PRINTER_NOT_FOUND,
+          404
+        );
+      }
+
       const status = await this.printerManager.getPrinterStatus(printerId);
-      res.json({ printerId, status });
+      const adapter = this.printerManager.getPrinter(printerId);
+      res.json({
+        printerId,
+        status,
+        reason: adapter?.state.reason,
+        healable: adapter?.state.healable === true
+      });
     } catch (error) {
       this.handleError(error, res);
     }
@@ -797,26 +899,34 @@ export class ApiServer {
       }
 
       const capabilities = printer.getCapabilities();
-      if (!capabilities.supportsCashDrawer) {
+      const drawer = printer.config.cashDrawer;
+
+      if (!capabilities.supportsCashDrawer || drawer?.enabled === false) {
         res.status(400).json({
           success: false,
-          error: 'Cash drawer not supported',
-          message: `Printer "${printerId}" does not have cash drawer support enabled in its configuration`
+          error: 'Cash drawer not enabled',
+          message: `The cash drawer is turned off for printer "${printerId}". Enable it in the printer's settings.`
         });
         return;
       }
 
-      const pin = req.body?.pin === 5 ? 5 : 2;
-      const drawerCmd = Buffer.from(
-        pin === 5 ? Commands.CASH_DRAWER_PIN5 : Commands.CASH_DRAWER_PIN2
-      );
+      // Explicit request values win, so the settings screen can test a pulse
+      // before saving it; otherwise use what the printer is configured with.
+      const pin = req.body?.pin === 5 ? 5 : req.body?.pin === 2 ? 2 : drawer?.pin ?? 2;
+      const onTimeMs = numberOr(req.body?.onTimeMs, drawer?.onTimeMs ?? 50);
+      const offTimeMs = numberOr(req.body?.offTimeMs, drawer?.offTimeMs ?? 200);
+
+      const drawerCmd = Buffer.from(cashDrawerPulse(pin, onTimeMs, offTimeMs));
       const result = await this.printerManager.print(printerId, drawerCmd);
 
-      res.json({
+      res.status(result.success ? 200 : 502).json({
         success: result.success,
+        pin,
+        onTimeMs,
+        offTimeMs,
         message: result.success
-          ? `Cash drawer opened on ${printerId} (pin ${pin})`
-          : `Failed to open cash drawer: ${result.error}`
+          ? `Cash drawer pulsed on ${printerId} (pin ${pin}, ${onTimeMs}ms). If it did not open, try pin ${pin === 2 ? 5 : 2} or a longer pulse.`
+          : `Could not open the cash drawer: ${result.error}`
       });
     } catch (error) {
       this.handleError(error, res);
@@ -886,16 +996,23 @@ export class ApiServer {
 
     this.logger.warn({ remoteIp, ua: req.get('user-agent') }, 'Service restart requested via API');
 
-    // Acknowledge immediately, then exit so node-windows respawns us.
+    // Acknowledge immediately, then restart so node-windows respawns us.
     res.status(202).json({
       success: true,
-      message: 'Service restart initiated. Process will respawn within ~5s.',
+      message: 'Service restart initiated. In-flight print jobs will finish first.',
       pid: process.pid
     });
 
-    // Give the response time to flush, then exit with code 1 so the
-    // node-windows wrapper performs an automatic restart.
+    // Let the response flush, then hand over to the service, which pauses
+    // intake, waits for receipts already printing, and flushes the job store
+    // before exiting. Exiting here directly would drop those jobs.
     setTimeout(() => {
+      if (this.config.onRestartRequested) {
+        this.config.onRestartRequested('restart requested via API');
+        return;
+      }
+
+      // No graceful handler wired up: still better than losing the queue.
       // eslint-disable-next-line no-console
       console.warn('[API] Restart requested — exiting process for wrapper respawn');
       process.exit(1);
@@ -980,7 +1097,14 @@ export class ApiServer {
         uptime: Date.now() - this.startTime,
         queue: queueStats,
         processor: processorMetrics,
-        printers: printerSummary
+        printers: printerSummary,
+        // Whether Windows is pushing device/queue changes to us. When false the
+        // service still works, but reacts on its polling interval instead of
+        // within about a second.
+        printerEvents: {
+          watching: this.printerManager.isWatcherRunning(),
+          mode: this.printerManager.isWatcherRunning() ? 'event-driven' : 'polling'
+        }
       });
     } catch (error) {
       this.handleError(error, res);
@@ -992,8 +1116,11 @@ export class ApiServer {
   private handleGetConfig(_req: Request, res: Response): void {
     try {
       const cm = this.config.configManager;
+      const server = cm.getServerConfig();
       res.json({
-        server: cm.getServerConfig(),
+        // activePort can differ from the configured port when the configured
+        // one was busy at startup; the dashboard shows both.
+        server: { ...server, activePort: this.activePort || server.port },
         security: cm.getSecurityConfig(),
         queue: cm.getQueueConfig(),
         logging: cm.getLoggingConfig(),
@@ -1029,6 +1156,12 @@ export class ApiServer {
       const newSecurity = cm.getSecurityConfig();
       this.config.security = newSecurity;
 
+      // Origin/host rules take effect on the very next request.
+      this.originPolicy.update({
+        allowedOrigins: newSecurity.allowedOrigins,
+        allowPrivateNetwork: newSecurity.allowPrivateNetwork !== false
+      });
+
       // Recreate rate limiter with updated limits
       try {
         this.rateLimiter = new RateLimiterMemory({
@@ -1059,9 +1192,384 @@ export class ApiServer {
     }
   }
 
+  // ── Discovery, Diagnosis and Repair ──
+
+  /**
+   * List every printer the user could add, ranked so real receipt printers
+   * come first, each with a ready-to-save configuration.
+   */
+  private async handleDiscoverPrinters(req: Request, res: Response): Promise<void> {
+    try {
+      const scanNetwork = req.query.network === 'true' || req.query.network === '1';
+      const includeVirtual = req.query.all === 'true' || req.query.all === '1';
+
+      const existing = this.config.configManager.getPrinters().map((p) => ({
+        id: p.id,
+        printerName: p.printerName
+      }));
+
+      const printers = await this.discovery.discoverAll({
+        scanNetwork,
+        includeVirtual,
+        existing,
+        timeout: 800
+      });
+
+      const snapshot = await this.printerManager.getPrintSystem().getSnapshot();
+      // Printers that are physically plugged in but have no driver installed.
+      // Surfacing these turns an empty discovery list on a freshly imaged
+      // machine into a specific instruction instead of a dead end.
+      const needsDriver = await this.discovery.findUninstalledDevices();
+
+      res.json({
+        printers,
+        needsDriver,
+        summary: {
+          total: printers.length,
+          recommended: printers.filter((p) => p.recommended).length,
+          alreadyConfigured: printers.filter((p) => p.alreadyConfiguredAs).length,
+          needsDriver: needsDriver.length
+        },
+        system: {
+          spoolerRunning: snapshot.spoolerRunning,
+          attachedUsbDevices: snapshot.usbDevices.length,
+          livePorts: snapshot.livePorts,
+          warnings: snapshot.warnings,
+          host: snapshot.host
+        }
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  /** The roles a printer can be assigned, for the setup UI. */
+  private handleListRoles(_req: Request, res: Response): void {
+    res.json({ roles: listRoles() });
+  }
+
+  /**
+   * Assign a Windows printer to a role.
+   *
+   * This is the whole "add a printer" flow: the caller says which physical
+   * printer and what it is for, and everything else — the id, the capability
+   * profile, the paper width, the cash drawer defaults, the identity
+   * breadcrumbs — is derived. Re-running it for a role that already exists
+   * repoints that role at the new printer, which is what someone replacing a
+   * broken unit actually wants.
+   */
+  private async handleSetupPrinterByRole(req: Request, res: Response): Promise<void> {
+    try {
+      const role = req.body?.role;
+      const windowsName = typeof req.body?.windowsName === 'string' ? req.body.windowsName.trim() : '';
+      const runTest = req.body?.test !== false;
+
+      if (!isPrinterRole(role)) {
+        throw new PrintServiceError(
+          `Unknown printer role "${String(role)}". Expected one of: ${listRoles().map((r) => r.id).join(', ')}`,
+          ErrorCodes.INVALID_REQUEST,
+          400
+        );
+      }
+
+      if (!windowsName) {
+        throw new PrintServiceError(
+          'windowsName is required — pick a printer from the discovery list',
+          ErrorCodes.INVALID_REQUEST,
+          400
+        );
+      }
+
+      const snapshot = await this.printerManager.getPrintSystem().refresh();
+      const windows = findByName(snapshot.printers, windowsName);
+
+      if (!windows) {
+        throw new PrintServiceError(
+          `Windows has no printer called "${windowsName}". It may have been removed or renamed.`,
+          ErrorCodes.PRINTER_NOT_FOUND,
+          404
+        );
+      }
+
+      const cm = this.config.configManager;
+      const existing = cm.getPrinter(role);
+      // The first printer configured should be the default, whatever its role.
+      const makeDefault = cm.getPrinters().length === 0 ? true : undefined;
+      const printerConfig = buildRoleConfig(role, windows, snapshot, {
+        makeDefault,
+        name: req.body?.name
+      });
+
+      if (existing) {
+        cm.updatePrinter(role, printerConfig);
+        await this.printerManager.unregisterPrinter(role).catch(() => undefined);
+      } else {
+        cm.addPrinter(printerConfig);
+      }
+
+      this.printerManager.registerPrinter(cm.getPrinter(role)!);
+      await this.printerManager.connectPrinter(role).catch(() => undefined);
+
+      const adapter = this.printerManager.getPrinter(role);
+      const ready = adapter?.isConnected() === true;
+
+      if (runTest && ready) {
+        this.queue.createJob({
+          idempotencyKey: `setup_${role}_${Date.now()}`,
+          printerId: role,
+          templateType: TemplateType.TEST,
+          payload: { message: `${printerConfig.name} is ready` },
+          priority: JobPriority.HIGH
+        });
+      }
+
+      res.status(existing ? 200 : 201).json({
+        success: true,
+        replaced: !!existing,
+        printer: cm.getPrinter(role),
+        status: adapter?.state.status ?? 'unknown',
+        ready,
+        // Never claim success when the printer is not actually usable: say
+        // exactly what is wrong so it can be fixed now rather than at service.
+        reason: adapter?.state.reason,
+        testPrinted: runTest && ready,
+        message: ready
+          ? `"${windows.name}" is now the ${role} printer.${runTest ? ' A test receipt has been sent.' : ''}`
+          : `"${windows.name}" was saved as the ${role} printer, but it is not ready: ${adapter?.state.reason ?? 'unknown reason'}`
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  /**
+   * One-click setup: configure every recommended thermal printer that is not
+   * already known, connect it, and make the first one the default.
+   */
+  private async handleAutoSetupPrinters(req: Request, res: Response): Promise<void> {
+    try {
+      const cm = this.config.configManager;
+      const existing = cm.getPrinters();
+      const test = req.body?.test !== false;
+
+      const candidates = await this.discovery.suggestAutoSetup(
+        existing.map((p) => ({ id: p.id, printerName: p.printerName }))
+      );
+
+      if (candidates.length === 0) {
+        res.json({
+          success: true,
+          added: [],
+          message:
+            existing.length > 0
+              ? 'Every thermal printer found is already configured.'
+              : 'No thermal printers were found. Check that the printer is installed in Windows, powered on, and connected.'
+        });
+        return;
+      }
+
+      const added: Array<{ id: string; name: string; status: string; tested: boolean }> = [];
+      const failed: Array<{ name: string; error: string }> = [];
+      const makeDefault = existing.length === 0;
+
+      for (const [index, candidate] of candidates.entries()) {
+        const printerConfig = {
+          ...candidate.suggestedConfig,
+          isDefault: makeDefault && index === 0
+        } as Parameters<typeof cm.addPrinter>[0];
+
+        try {
+          cm.addPrinter(printerConfig);
+          this.printerManager.registerPrinter(printerConfig);
+          await this.printerManager.connectPrinter(printerConfig.id).catch(() => undefined);
+
+          const adapter = this.printerManager.getPrinter(printerConfig.id);
+
+          if (test && adapter?.isConnected()) {
+            this.queue.createJob({
+              idempotencyKey: `autosetup_${printerConfig.id}_${Date.now()}`,
+              printerId: printerConfig.id,
+              templateType: TemplateType.TEST,
+              payload: { message: `${printerConfig.name} configured automatically` },
+              priority: JobPriority.HIGH
+            });
+          }
+
+          added.push({
+            id: printerConfig.id,
+            name: printerConfig.name ?? printerConfig.id,
+            status: adapter?.state.status ?? 'unknown',
+            tested: test && !!adapter?.isConnected()
+          });
+        } catch (err) {
+          failed.push({ name: candidate.name, error: (err as Error).message });
+        }
+      }
+
+      res.status(added.length > 0 ? 201 : 400).json({
+        success: added.length > 0,
+        added,
+        failed,
+        message:
+          added.length > 0
+            ? `Added ${added.length} printer(s).${test ? ' A test receipt was sent to each one that is ready.' : ''}`
+            : 'No printers could be added.',
+        printers: cm.getPrinters()
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  /**
+   * Explain a printer's state: what Windows reports, what the service concluded
+   * and why, and which repairs are available.
+   */
+  private async handleDiagnosePrinter(req: Request, res: Response): Promise<void> {
+    try {
+      const { printerId } = req.params;
+      const report = await this.printerManager.diagnosePrinter(printerId);
+      res.json(report);
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  /**
+   * Run the repair plan: repoint a migrated USB port, clear a stale offline
+   * flag, resume a paused queue, restart the spooler.
+   */
+  private async handleRepairPrinter(req: Request, res: Response): Promise<void> {
+    try {
+      const { printerId } = req.params;
+      const result = await this.printerManager.healPrinter(printerId);
+      const adapter = this.printerManager.getPrinter(printerId);
+
+      res.json({
+        success: result.statusAfter !== result.statusBefore || adapter?.isConnected() === true,
+        printerId,
+        statusBefore: result.statusBefore,
+        statusAfter: result.statusAfter,
+        attempted: result.attempted,
+        succeeded: result.succeeded,
+        reason: result.reason,
+        manualHint: result.manualHint,
+        message:
+          result.attempted.length === 0
+            ? result.manualHint || 'Nothing needed repairing.'
+            : `Ran ${result.succeeded.length} of ${result.attempted.length} repair step(s). ${result.reason}`
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  /**
+   * Server-sent events carrying printer state changes as they happen.
+   *
+   * The service already learns about a plug or unplug within about a second via
+   * WMI; without this the dashboard would still sit on a 10-second poll and
+   * feel broken by comparison. Each client gets the current state immediately on
+   * connect, so there is no window where the page shows nothing.
+   */
+  private handleEventStream(req: Request, res: Response): void {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // Proxies that buffer would defeat the point of streaming.
+      'X-Accel-Buffering': 'no'
+    });
+
+    const send = (event: string, data: unknown): void => {
+      if (res.writableEnded) return;
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // Client vanished mid-write; the close handler cleans up.
+      }
+    };
+
+    const snapshot = () => ({
+      printers: this.printerManager.getAllPrinters(),
+      summary: this.printerManager.getSummary()
+    });
+
+    send('printers', snapshot());
+
+    // One physical change raises several manager events (a status change per
+    // printer, plus connect/disconnect). Coalesce them into a single push so
+    // the client re-renders once rather than three times.
+    let coalesce: NodeJS.Timeout | null = null;
+    const onChange = (): void => {
+      if (coalesce) return;
+      coalesce = setTimeout(() => {
+        coalesce = null;
+        send('printers', snapshot());
+      }, 150);
+    };
+
+    const events = [
+      'printerStatusChange',
+      'printerConnected',
+      'printerDisconnected',
+      'printerRebound',
+      'printerHealed'
+    ];
+    for (const name of events) {
+      this.printerManager.on(name, onChange);
+    }
+
+    // Keeps intermediaries from closing an idle connection, and lets the client
+    // notice a dead link.
+    const heartbeat = setInterval(() => {
+      if (res.writableEnded) return;
+      try {
+        res.write(': keep-alive\n\n');
+      } catch {
+        // Ignore.
+      }
+    }, 25000);
+
+    const cleanup = (): void => {
+      clearInterval(heartbeat);
+      if (coalesce) clearTimeout(coalesce);
+      for (const name of events) {
+        this.printerManager.off(name, onChange);
+      }
+    };
+
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+  }
+
+  /** Raw view of the Windows print system, for support and troubleshooting. */
+  private async handlePrintSystemSnapshot(_req: Request, res: Response): Promise<void> {
+    try {
+      const snapshot = await this.printerManager.getPrintSystem().refresh();
+      res.json(snapshot);
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
   private async handleAddPrinter(req: Request, res: Response): Promise<void> {
     try {
       const cm = this.config.configManager;
+
+      // A clash of ids is a conflict the caller can resolve, not a server
+      // fault, and it deserves an answer that says what to do about it.
+      const requestedId = typeof req.body?.id === 'string' ? req.body.id : '';
+      if (requestedId && cm.getPrinter(requestedId)) {
+        throw new PrintServiceError(
+          `A printer with the id "${requestedId}" already exists. Edit that printer, ` +
+            `or choose a different id.`,
+          ErrorCodes.INVALID_REQUEST,
+          409
+        );
+      }
+
       cm.addPrinter(req.body);
 
       // Live-register the printer in the manager and connect it
@@ -1209,19 +1717,6 @@ export class ApiServer {
         error: 'Not Found',
         message: 'The requested endpoint does not exist'
       });
-    });
-
-    // CORS rejection handler
-    this.app.use((error: Error, _req: Request, res: Response, next: NextFunction) => {
-      if (error.message === 'Not allowed by CORS') {
-        this.logger.warn({ error: error.message }, 'CORS origin blocked');
-        res.status(403).json({
-          error: 'Forbidden',
-          message: 'Origin not allowed by CORS'
-        });
-        return;
-      }
-      next(error);
     });
 
     // Global error handler
@@ -1372,6 +1867,12 @@ export class ApiServer {
   getApp(): Express {
     return this.app;
   }
+}
+
+/** Coerce a request field to a finite number, falling back when absent. */
+function numberOr(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export default ApiServer;

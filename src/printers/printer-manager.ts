@@ -5,8 +5,11 @@
 
 import { EventEmitter } from 'events';
 import { PrinterAdapter, PrintResult } from './base-adapter';
-import { USBPrinterAdapter } from './usb-adapter';
+import { USBPrinterAdapter, PrinterRebindEvent, HealResult } from './usb-adapter';
 import { NetworkPrinterAdapter } from './network-adapter';
+import { initWindowsPrintSystem, WindowsPrintSystem } from './windows-printers';
+import { DeviceWatcher } from './device-watcher';
+import { PrinterIdentityHints } from './printer-resolver';
 import {
   PrinterConfig,
   PrinterInfo,
@@ -21,6 +24,14 @@ export interface PrinterManagerConfig {
   printers: PrinterConfig[];
   autoConnect: boolean;
   healthCheckInterval: number;
+  /**
+   * Persist a config change discovered at runtime — a rebind to a renamed
+   * queue, or freshly learned identity breadcrumbs. Without this the service
+   * re-learns the same thing after every restart.
+   */
+  persistPrinterUpdate?: (printerId: string, updates: Partial<PrinterConfig>) => void;
+  /** Attempt automated repairs when a printer goes offline. Default: true. */
+  autoHeal?: boolean;
 }
 
 export class PrinterManager extends EventEmitter {
@@ -30,12 +41,44 @@ export class PrinterManager extends EventEmitter {
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private readonly logger: Logger;
   private readonly healthCheckInterval: number;
+  private readonly persistPrinterUpdate?: (
+    printerId: string,
+    updates: Partial<PrinterConfig>
+  ) => void;
+  private readonly autoHeal: boolean;
+  private readonly printSystem: WindowsPrintSystem;
+  private readonly watcher: DeviceWatcher;
   private _initializing = false;
+  /** Health-check cadence in use; tightened when the watcher is unavailable. */
+  private activeHealthInterval: number;
+  private reconciling = false;
+  private reconcileQueued = false;
 
   constructor(config: PrinterManagerConfig, logger: Logger) {
     super();
     this.logger = logger;
     this.healthCheckInterval = config.healthCheckInterval || 30000;
+    this.persistPrinterUpdate = config.persistPrinterUpdate;
+    this.autoHeal = config.autoHeal !== false;
+
+    // One shared view of the Windows print system for every adapter, so a
+    // health check across all printers costs a single PowerShell process.
+    this.printSystem = initWindowsPrintSystem(logger);
+    this.activeHealthInterval = this.healthCheckInterval;
+
+    // Windows tells us when devices and queues change, so a printer that is
+    // unplugged, replugged, or moved to another socket is picked up in about a
+    // second instead of on the next poll.
+    this.watcher = new DeviceWatcher(logger);
+    this.watcher.on('change', ({ source }) => {
+      this.logger.debug({ source }, 'Printer or device change detected');
+      void this.reconcile('device change');
+    });
+    this.watcher.on('unavailable', () => {
+      // No event feed: poll harder so responsiveness degrades gracefully
+      // instead of dropping to the slow safety interval.
+      this.setHealthInterval(Math.min(this.healthCheckInterval, 8000));
+    });
 
     // Register printers from config
     for (const printerConfig of config.printers) {
@@ -48,6 +91,100 @@ export class PrinterManager extends EventEmitter {
         this.logger.error('Error during auto-connect:', err);
       });
     }
+
+    this.watcher.start();
+  }
+
+  /**
+   * React to a device or queue change: re-read Windows, then bring every
+   * enabled printer to the best state it can reach.
+   *
+   * Serialised, because a single plug-in can produce several triggers and
+   * running two reconciliations concurrently would fight over the same repairs.
+   */
+  private async reconcile(trigger: string): Promise<void> {
+    if (this.reconciling) {
+      this.reconcileQueued = true;
+      return;
+    }
+    this.reconciling = true;
+
+    try {
+      // The world just changed, so the cached snapshot is worthless.
+      this.printSystem.invalidate();
+
+      for (const [id, adapter] of this.printers) {
+        const config = this.configs.get(id);
+        if (!config?.enabled) continue;
+
+        const before = adapter.state.status;
+
+        try {
+          const status = await adapter.getStatus();
+
+          if (status === PrinterStatus.ONLINE && !adapter.isConnected()) {
+            await adapter.connect().catch(() => undefined);
+          } else if (
+            this.autoHeal &&
+            adapter.state.healable &&
+            adapter instanceof USBPrinterAdapter &&
+            (status === PrinterStatus.OFFLINE || status === PrinterStatus.ERROR)
+          ) {
+            await adapter.heal();
+            if (adapter.state.status === PrinterStatus.ONLINE && !adapter.isConnected()) {
+              await adapter.connect().catch(() => undefined);
+            }
+          }
+        } catch (error) {
+          this.logger.debug(
+            { printerId: id, error: (error as Error).message },
+            'Reconcile step failed'
+          );
+        }
+
+        const after = adapter.state.status;
+        if (after !== before) {
+          this.logger.info(
+            { printerId: id, from: before, to: after, trigger },
+            `Printer ${id} changed from ${before} to ${after}`
+          );
+          this.emit('printerStatusChange', { id, status: after, reason: adapter.state.reason });
+        }
+      }
+    } finally {
+      this.reconciling = false;
+
+      if (this.reconcileQueued) {
+        this.reconcileQueued = false;
+        void this.reconcile('coalesced change');
+      }
+    }
+  }
+
+  /** Change the health-check cadence, restarting the timer if it is running. */
+  private setHealthInterval(ms: number): void {
+    if (this.activeHealthInterval === ms) return;
+    this.activeHealthInterval = ms;
+
+    if (this.healthCheckTimer) {
+      this.stopHealthCheck();
+      this.startHealthCheck();
+    }
+  }
+
+  /** Force an immediate reconcile (used after config changes). */
+  async refreshAll(reason = 'manual refresh'): Promise<void> {
+    await this.reconcile(reason);
+  }
+
+  /** Whether change events are being delivered, for diagnostics. */
+  isWatcherRunning(): boolean {
+    return this.watcher.isRunning;
+  }
+
+  /** The shared Windows print system view (discovery, diagnostics, repairs). */
+  getPrintSystem(): WindowsPrintSystem {
+    return this.printSystem;
   }
 
   /**
@@ -95,7 +232,40 @@ export class PrinterManager extends EventEmitter {
       this.emit('printerReconnecting', info);
     });
 
+    // The adapter found its queue under a different name (renamed printer, or
+    // a driver re-install that created "XP-80C (Copy 1)"). Persist the new name
+    // so the rebind survives a service restart.
+    adapter.on('rebound', (event: PrinterRebindEvent) => {
+      this.logger.warn(
+        { printerId: event.printerId, from: event.from, to: event.to },
+        `Printer "${event.printerId}" rebound to Windows queue "${event.to}": ${event.reason}`
+      );
+
+      const cfg = this.configs.get(event.printerId);
+      if (cfg) {
+        cfg.printerName = event.to;
+      }
+      this.savePrinterUpdate(event.printerId, { printerName: event.to });
+      this.refreshSiblingNames();
+      this.emit('printerRebound', event);
+    });
+
+    // Identity breadcrumbs (port, driver, USB hardware id) that let us re-find
+    // this printer after it moves or is reinstalled.
+    adapter.on(
+      'identityLearned',
+      ({ printerId, hints }: { printerId: string; hints: PrinterIdentityHints }) => {
+        const cfg = this.configs.get(printerId);
+        if (!cfg) return;
+
+        const metadata = { ...(cfg.metadata ?? {}), ...hints };
+        cfg.metadata = metadata;
+        this.savePrinterUpdate(printerId, { metadata });
+      }
+    );
+
     this.printers.set(config.id, adapter);
+    this.refreshSiblingNames();
 
     // Set as default if specified or if it's the first printer
     if (config.isDefault || this.defaultPrinterId === null) {
@@ -103,6 +273,40 @@ export class PrinterManager extends EventEmitter {
     }
 
     this.logger.info(`Registered printer: ${config.id} (${config.type})`);
+  }
+
+  /**
+   * Write a runtime-discovered config change back to config.json, without
+   * letting a persistence failure take the printer down.
+   */
+  private savePrinterUpdate(printerId: string, updates: Partial<PrinterConfig>): void {
+    if (!this.persistPrinterUpdate) return;
+    try {
+      this.persistPrinterUpdate(printerId, updates);
+    } catch (error) {
+      this.logger.warn(
+        { printerId, error: (error as Error).message },
+        'Could not persist printer configuration change'
+      );
+    }
+  }
+
+  /**
+   * Tell each USB adapter which Windows queues its siblings own, so an
+   * automatic rebind can never steal the kitchen printer's queue.
+   */
+  private refreshSiblingNames(): void {
+    const usbAdapters = Array.from(this.printers.values()).filter(
+      (a): a is USBPrinterAdapter => a instanceof USBPrinterAdapter
+    );
+
+    for (const adapter of usbAdapters) {
+      const others = usbAdapters
+        .filter((other) => other.id !== adapter.id)
+        .map((other) => other.targetPrinterName)
+        .filter(Boolean);
+      adapter.setSiblingQueueNames(others);
+    }
   }
 
   /**
@@ -122,6 +326,7 @@ export class PrinterManager extends EventEmitter {
       this.defaultPrinterId = firstPrinter ?? null;
     }
 
+    this.refreshSiblingNames();
     this.logger.info(`Unregistered printer: ${printerId}`);
   }
 
@@ -294,7 +499,8 @@ export class PrinterManager extends EventEmitter {
     }
 
     if (!adapter.isConnected()) {
-      // Try to reconnect
+      // Try to reconnect. connect() repairs what it can (stale offline flag,
+      // migrated USB port, renamed queue) before giving up.
       this.logger.info(`Printer ${printerId} not connected, attempting to reconnect...`);
       try {
         await adapter.connect();
@@ -302,6 +508,18 @@ export class PrinterManager extends EventEmitter {
         throw new PrintServiceError(
           `Failed to connect to printer: ${(error as Error).message}`,
           ErrorCodes.PRINTER_CONNECTION_FAILED,
+          503
+        );
+      }
+
+      // connect() resolves without throwing for conditions the user must fix
+      // (no paper, cover open, cable unplugged). Refuse the write so the job
+      // stays in our queue and retries, rather than spooling into Windows
+      // where it would surface hours later.
+      if (!adapter.isConnected()) {
+        throw new PrintServiceError(
+          adapter.state.reason || `Printer ${printerId} is not ready`,
+          ErrorCodes.PRINTER_OFFLINE,
           503
         );
       }
@@ -387,29 +605,61 @@ export class PrinterManager extends EventEmitter {
     }
 
     this.healthCheckTimer = setInterval(async () => {
+      // All adapters share one cached snapshot, so this is a single query to
+      // Windows regardless of how many printers are configured.
+      const previous = new Map(
+        Array.from(this.printers.entries()).map(([id, a]) => [id, a.state.status])
+      );
       const statuses = await this.healthCheckAll();
-      
+
       for (const [id, status] of statuses) {
         const adapter = this.printers.get(id);
         if (!adapter) continue;
-        
-        if (status !== adapter.state.status) {
-          this.emit('printerStatusChange', { id, status });
+
+        if (status !== previous.get(id)) {
+          this.emit('printerStatusChange', { id, status, reason: adapter.state.reason });
         }
 
-        // Auto-reconnect offline/error printers that are enabled
         const config = this.configs.get(id);
-        if (config?.enabled && (status === PrinterStatus.OFFLINE || status === PrinterStatus.ERROR)) {
-          this.logger.info(`Printer ${id} is ${status}, attempting auto-reconnect...`);
+        if (!config?.enabled) continue;
+        if (status !== PrinterStatus.OFFLINE && status !== PrinterStatus.ERROR) continue;
+
+        // Try an automated repair first — a migrated USB port or a stale
+        // offline flag is fixed here without anyone noticing.
+        if (this.autoHeal && adapter.state.healable && adapter instanceof USBPrinterAdapter) {
           try {
-            await adapter.connect();
-            this.logger.info(`Printer ${id} reconnected successfully`);
+            const result = await adapter.heal();
+            if (result.attempted.length > 0) {
+              this.logger.info(
+                {
+                  printerId: id,
+                  attempted: result.attempted.map((a) => a.kind),
+                  succeeded: result.succeeded.map((a) => a.kind),
+                  statusAfter: result.statusAfter
+                },
+                `Auto-repair ran for printer ${id}: ${result.reason}`
+              );
+            }
+            if (result.statusAfter === PrinterStatus.ONLINE) {
+              this.emit('printerHealed', { printerId: id, result });
+              continue;
+            }
           } catch (err) {
-            this.logger.warn(`Printer ${id} reconnect failed: ${(err as Error).message}`);
+            this.logger.warn(`Printer ${id} auto-repair failed: ${(err as Error).message}`);
           }
         }
+
+        this.logger.info(`Printer ${id} is ${status}, attempting auto-reconnect...`);
+        try {
+          await adapter.connect();
+          if (adapter.isConnected()) {
+            this.logger.info(`Printer ${id} reconnected successfully`);
+          }
+        } catch (err) {
+          this.logger.warn(`Printer ${id} reconnect failed: ${(err as Error).message}`);
+        }
       }
-    }, this.healthCheckInterval);
+    }, this.activeHealthInterval);
   }
 
   /**
@@ -500,6 +750,63 @@ export class PrinterManager extends EventEmitter {
   }
 
   /**
+   * Run the repair plan for a printer on demand (dashboard "Repair" action).
+   */
+  async healPrinter(printerId: string): Promise<HealResult> {
+    const adapter = this.printers.get(printerId);
+    if (!adapter) {
+      throw new PrintServiceError(
+        `Printer not found: ${printerId}`,
+        ErrorCodes.PRINTER_NOT_FOUND,
+        404
+      );
+    }
+
+    if (!(adapter instanceof USBPrinterAdapter)) {
+      throw new PrintServiceError(
+        'Automated repair is only available for local (USB) printers',
+        ErrorCodes.INVALID_REQUEST,
+        400
+      );
+    }
+
+    const result = await adapter.heal(true);
+
+    // A repair often makes the printer usable again; reflect that immediately
+    // instead of waiting for the next health check.
+    if (result.statusAfter === PrinterStatus.ONLINE && !adapter.isConnected()) {
+      await adapter.connect().catch(() => undefined);
+    }
+
+    return result;
+  }
+
+  /**
+   * Full diagnostic report for a printer: what Windows reports, what the
+   * service concluded, and which repairs are available.
+   */
+  async diagnosePrinter(printerId: string): Promise<ReturnType<USBPrinterAdapter['diagnose']>> {
+    const adapter = this.printers.get(printerId);
+    if (!adapter) {
+      throw new PrintServiceError(
+        `Printer not found: ${printerId}`,
+        ErrorCodes.PRINTER_NOT_FOUND,
+        404
+      );
+    }
+
+    if (!(adapter instanceof USBPrinterAdapter)) {
+      throw new PrintServiceError(
+        'Diagnostics are only available for local (USB) printers',
+        ErrorCodes.INVALID_REQUEST,
+        400
+      );
+    }
+
+    return adapter.diagnose();
+  }
+
+  /**
    * Reconnect to a specific printer
    */
   async reconnect(printerId: string): Promise<void> {
@@ -541,6 +848,7 @@ export class PrinterManager extends EventEmitter {
    */
   async shutdown(): Promise<void> {
     this.logger.info('Shutting down printer manager...');
+    this.watcher.stop();
     await this.disconnectAll();
     this.removeAllListeners();
     this.logger.info('Printer manager shutdown complete');

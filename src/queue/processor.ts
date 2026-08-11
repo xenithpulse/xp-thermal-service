@@ -7,13 +7,14 @@ import { EventEmitter } from 'events';
 import { JobQueue } from './job-queue';
 import { PrinterManager } from '../printers/printer-manager';
 import { TemplateEngine } from '../templates/engine';
-import { Commands } from '../escpos/builder';
+import { cashDrawerPulse } from '../escpos/builder';
 import {
   PrintJob,
   JobStatus,
   JobResult,
   ServiceEvent,
-  PrinterStatus
+  PrinterStatus,
+  TemplateType
 } from '../types';
 import { Logger } from '../utils/logger';
 
@@ -213,17 +214,29 @@ export class JobProcessor extends EventEmitter {
         throw new Error(printResult.error || 'Print failed');
       }
 
-      // Open cash drawer if requested via metadata AND supported by printer
-      if (job.metadata?.openCashDrawer) {
+      // Open the cash drawer when the job asks for it, or when this printer is
+      // configured to open on every receipt. The pulse timings come from the
+      // printer's own settings, because drawers vary in how long a pulse they
+      // need before the solenoid throws.
+      const drawer = printer.config.cashDrawer;
+      const wantsDrawer =
+        job.metadata?.openCashDrawer === true ||
+        (drawer?.openOnPrint === true && job.templateType === TemplateType.RECEIPT);
+
+      if (wantsDrawer) {
         const capabilities = printer.getCapabilities();
-        if (capabilities.supportsCashDrawer) {
+        const drawerEnabled = drawer ? drawer.enabled : capabilities.supportsCashDrawer;
+
+        if (capabilities.supportsCashDrawer && drawerEnabled) {
           this.logger.debug(`Opening cash drawer for printer ${job.printerId}`);
-          const drawerCmd = Buffer.from(Commands.CASH_DRAWER_PIN2);
+          const drawerCmd = Buffer.from(
+            cashDrawerPulse(drawer?.pin ?? 2, drawer?.onTimeMs, drawer?.offTimeMs)
+          );
           await this.printerManager.print(job.printerId, drawerCmd).catch(err => {
             this.logger.warn(`Cash drawer open failed for ${job.printerId}: ${(err as Error).message}`);
           });
         } else {
-          this.logger.debug(`Skipping cash drawer for ${job.printerId} — not supported by config`);
+          this.logger.debug(`Skipping cash drawer for ${job.printerId} — disabled in its configuration`);
         }
       }
 

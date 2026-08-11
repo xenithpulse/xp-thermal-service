@@ -64,7 +64,13 @@ export class WindowsServiceManager {
         script: this.options.script!,
         env: this.options.env,
         nodeOptions: ['--max-old-space-size=256'],
-        maxRestarts: 10,
+        // A till must come back no matter how many times it has failed today.
+        // node-windows counts restarts in a rolling window and then gives up
+        // permanently — with a low cap, a few restarts in quick succession
+        // (a watchdog recovery, then an admin restart) leave the service dead
+        // until someone notices. Windows SCM recovery is the backstop, but it
+        // only fires if the wrapper itself dies, not when it stops respawning.
+        maxRestarts: 100,
         wait: 5,
         grow: 0.5,
         workingDirectory: projectRoot

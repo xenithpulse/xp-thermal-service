@@ -16,6 +16,9 @@
     "service:start": "node dist/service/installer.js start",
     "service:stop": "node dist/service/installer.js stop",
     "test": "jest",
+    "qa": "node scripts/deep-qa.js",
+    "qa:write": "node scripts/deep-qa.js --write",
+    "qa:full": "node scripts/deep-qa.js --write --print",
     "lint": "eslint src/**/*.ts"
   },
   "keywords": [
@@ -43,12 +46,15 @@
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.25",
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.11.16",
     "@types/node-windows": "^0.1.6",
     "@types/qrcode": "^1.5.5",
     "@types/sql.js": "^1.4.10",
     "@types/uuid": "^9.0.8",
+    "jest": "^30.4.2",
     "node-windows": "^1.0.0-beta.8",
+    "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   },

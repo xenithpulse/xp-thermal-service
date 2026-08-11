@@ -89,6 +89,22 @@ export interface PrinterCapabilities {
   codepage: number;
 }
 
+/**
+ * Cash drawer wiring. Drawers are connected to the printer's RJ11 port and
+ * opened by an ESC/POS pulse, so the settings live with the printer.
+ */
+export interface CashDrawerConfig {
+  enabled: boolean;
+  /** Which drawer connector to pulse. Pin 2 is by far the most common. */
+  pin: 2 | 5;
+  /** Pulse duration. Stiff or twin drawers sometimes need a longer pulse. */
+  onTimeMs: number;
+  /** Gap before the drawer may be pulsed again. */
+  offTimeMs: number;
+  /** Open automatically whenever a receipt finishes printing. */
+  openOnPrint: boolean;
+}
+
 export interface PrinterConfig {
   id: string;
   name: string;
@@ -106,6 +122,7 @@ export interface PrinterConfig {
   timeout: number;
   maxRetries: number;
   capabilities: PrinterCapabilities;
+  cashDrawer?: CashDrawerConfig;
   metadata?: Record<string, unknown>;
 }
 
@@ -117,6 +134,13 @@ export interface PrinterState {
   consecutiveFailures: number;
   totalJobsPrinted: number;
   isConnected: boolean;
+  /** Plain-language explanation of the current status, for the dashboard. */
+  reason?: string;
+  /** The Windows queue actually in use, which may differ from the configured
+   *  name after the service rebound to a renamed or moved printer. */
+  boundPrinterName?: string;
+  /** True when an automated repair is likely to resolve the current state. */
+  healable?: boolean;
 }
 
 export interface PrinterInfo extends PrinterConfig {
@@ -461,12 +485,23 @@ export interface ServerConfig {
 }
 
 export interface SecurityConfig {
+  /**
+   * Origins allowed to call the API. Supports `*` wildcards
+   * (e.g. `https://*.pos.example.com`). Loopback origins are always allowed
+   * on every port and need not be listed.
+   */
   allowedOrigins: string[];
   allowedHosts: string[];
   rateLimitPerMinute: number;
   enableApiKey: boolean;
   apiKey?: string;
   maxPayloadSize: number;
+  /**
+   * Allow browsers on the same private network (10.x, 172.16–31.x, 192.168.x)
+   * to reach the service. On by default: a POS terminal talking to the till PC
+   * is the normal deployment, and the API is bound to the LAN anyway.
+   */
+  allowPrivateNetwork: boolean;
 }
 
 export interface QueueConfig {
