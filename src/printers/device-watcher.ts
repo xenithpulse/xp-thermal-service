@@ -17,7 +17,7 @@
  *                                    Type-C dock connect/disconnect.
  *
  *   __InstanceModificationEvent      intrinsic, on Win32_Printer only. That is
- *   ... ISA 'Win32_Printer'          a small class, so a 5-second WITHIN clause
+ *   ... ISA 'Win32_Printer'          a small class, so a 2-second WITHIN clause
  *                                    is cheap. Catches WorkOffline flips, queue
  *                                    pauses, paper-out, and driver changes that
  *                                    do not involve a device arriving.
