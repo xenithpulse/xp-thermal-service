@@ -14,7 +14,7 @@
  *
  * The lock is a file holding the owning PID.
  *
- * ─────────────────────────────────────────────────────────────────────────────
+ * ───────────────────────────────────────────────────────────────────────────
  * WHY THE PID ALONE IS NOT ENOUGH
  *
  * A lock file that says "PID 5504 owns this" is only meaningful while PID 5504
