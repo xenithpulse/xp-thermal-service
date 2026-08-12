@@ -863,6 +863,14 @@ For more information, see the documentation.
     await service.start();
     lock.updatePort(service.getActivePort());
 
+    // Start proving we are alive. Until this runs, the lock is just a PID, and
+    // a PID outlives the process that owned it: Windows hands the number out
+    // again, and the next start reads it as "another copy is already running"
+    // and stands down. Forever, and through a reinstall, because the lock file
+    // lives in the data directory the installer preserves. The heartbeat is
+    // what makes an abandoned lock expire on its own. See utils/instance-lock.
+    lock.startHeartbeat();
+
     // Start health monitoring in production
     if (isService || process.env.NODE_ENV === 'production') {
       startHealthMonitoring();

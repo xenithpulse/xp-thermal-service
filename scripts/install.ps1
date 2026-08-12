@@ -930,20 +930,58 @@ function Set-PowerManagement {
         Write-Log "Could not set power request override (non-fatal): $_" "WARNING"
     }
 
-    # Start only after the Print Spooler. Delayed auto-start usually gets us
-    # there anyway, but "usually" is not good enough across a fleet: without the
-    # dependency the service can come up first on a fast machine, find no
-    # printers, and report everything offline until the next health check.
+    # ── The Print Spooler: needed, NOT depended on ──────────────────────────
+    #
+    # This used to be `sc config <svc> depend= Spooler`, to stop the service
+    # coming up before the spooler on a fast machine, finding no printers and
+    # reporting everything offline until the next health check.
+    #
+    # It was the wrong trade and it caused a real outage. A Windows service
+    # dependency does two things, and only the first was wanted:
+    #
+    #   start order    the dependency starts first.        <- what we wanted
+    #   stop cascade   when the dependency is stopped
+    #                  DELIBERATELY, Windows stops every
+    #                  dependent with it - and never
+    #                  starts them again afterwards.       <- the outage
+    #
+    # The spooler is stopped deliberately more often than anything else on a
+    # Windows box: installing a printer driver does it, Windows Update does it,
+    # and "restart the print spooler" is the first thing anyone tries when a
+    # queue jams. Every one of those left this service Stopped, with nothing in
+    # any log that mentions printing, and staff finding out when a receipt did
+    # not come out.
+    #
+    # The start-order problem it was solving no longer exists: the device
+    # watcher (src/printers/device-watcher.ts) subscribes to WMI device and
+    # printer events, so a printer that becomes visible after startup is picked
+    # up in under a second, and the watcher already recovers from a spooler
+    # crash. Nothing needs the spooler to exist at the moment this service boots.
+    #
+    # What IS worth doing is making sure the spooler itself comes back.
     try {
-        sc.exe config $ServiceName depend= Spooler 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-OK "Service now depends on the Print Spooler"
-            Write-Log "Service dependency on Spooler configured" "SUCCESS"
-        } else {
-            Write-Log "Could not set Spooler dependency (exit $LASTEXITCODE, non-fatal)" "WARNING"
+        $spoolerCfg = Get-CimInstance Win32_Service -Filter "Name='Spooler'" -ErrorAction SilentlyContinue
+        if ($spoolerCfg -and $spoolerCfg.StartMode -ne 'Auto') {
+            sc.exe config Spooler start= auto 2>&1 | Out-Null
         }
+        # Windows gives the spooler two restarts inside a one-hour window and
+        # nothing after that. Three, over a day, for the service this one prints
+        # through.
+        sc.exe failure Spooler reset= 86400 actions= restart/5000/restart/10000/restart/30000 2>&1 | Out-Null
+        $spooler = Get-Service -Name Spooler -ErrorAction SilentlyContinue
+        if ($spooler -and $spooler.Status -ne 'Running') {
+            Start-Service -Name Spooler -ErrorAction SilentlyContinue
+        }
+
+        # Remove the dependency if an older install of this service set one. A
+        # single forward slash is how sc.exe clears a dependency list; an empty
+        # string never reaches it.
+        sc.exe config $ServiceName depend= / 2>&1 | Out-Null
+
+        Write-OK "Print Spooler set to auto-restart (no hard dependency)"
+        Write-Log "Spooler recovery configured; hard dependency removed" "SUCCESS"
     } catch {
-        Write-Log "Could not set Spooler dependency (non-fatal): $_" "WARNING"
+        Write-Log "Could not configure the Print Spooler (non-fatal): $_" "WARNING"
     }
 }
 
@@ -1136,6 +1174,58 @@ function Find-LiveHealthPort {
     return $null
 }
 
+# A lock file left behind by a process that was killed rather than stopped.
+#
+# The service refuses to run a second copy of itself, and the lock names the
+# owning process ID. Windows reuses process IDs, so after a reboot that ID may
+# belong to something unrelated - and the service then stands down a few
+# seconds after every start, forever, including after a reinstall, because the
+# lock lives in the data directory the installer preserves.
+#
+# The service itself now expires an abandoned lock (see utils/instance-lock),
+# but this watchdog also clears one outright: it is the fastest responder on
+# the box, and it fixes terminals still running an older build.
+function Clear-StaleLock {
+    $lockPath = "$installPath\data\service.lock"
+    if (-not (Test-Path $lockPath)) { return }
+    try {
+        $lock = Get-Content $lockPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+        Write-WatchdogLog "Removed an unreadable lock file"
+        return
+    }
+
+    $stale = $false
+    $why   = ""
+    # Compare in UTC explicitly on both sides. The lock carries an ISO-8601 UTC
+    # timestamp; a bare [datetime] cast reads it through the current culture and
+    # may return local or UTC, and comparing the two by ticks would mark a
+    # healthy lock stale and stop a working till from printing.
+    try {
+        $bootUtc = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
+        if ($lock.startedAt) {
+            $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+            $startedUtc = [datetime]::Parse($lock.startedAt, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+            if ($startedUtc -lt $bootUtc) { $stale = $true; $why = "written before the last boot" }
+        }
+    } catch {}
+
+    if (-not $stale -and $lock.pid) {
+        $holder = Get-Process -Id $lock.pid -ErrorAction SilentlyContinue
+        if (-not $holder) {
+            $stale = $true; $why = "process $($lock.pid) no longer exists"
+        } elseif ($holder.ProcessName -notmatch 'node') {
+            $stale = $true; $why = "process $($lock.pid) is '$($holder.ProcessName)', a reused process ID"
+        }
+    }
+
+    if ($stale) {
+        Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+        Write-WatchdogLog "Cleared a stale instance lock ($why) - this is what stops the service starting after a hard reset"
+    }
+}
+
 function Get-FailureCount {
     if (Test-Path $stateFile) {
         try {
@@ -1181,6 +1271,9 @@ function Invoke-FullRestart {
 
     Start-Sleep -Seconds 2
 
+    # The process we just killed cannot have released its own lock.
+    Clear-StaleLock
+
     # Start the service again
     try {
         Start-Service -Name $serviceName -ErrorAction Stop
@@ -1202,10 +1295,19 @@ if (-not $svc) {
     return
 }
 
-# 1. If service is not Running, start it immediately
+# 1. If service is not Running, start it immediately.
+#    Clear an abandoned lock FIRST: without that, a start on a box that was
+#    reset hard succeeds as far as Windows is concerned and the service exits
+#    four seconds later, every two minutes, indefinitely.
 if ($svc.Status -ne 'Running') {
     Write-WatchdogLog "Service status=$($svc.Status) — starting"
-    try { Start-Service -Name $svc.Name -ErrorAction Stop } catch { sc.exe start $svc.Name 2>&1 | Out-Null }
+    Clear-StaleLock
+    try { Start-Service -Name $svc.Name -ErrorAction Stop } catch {
+        $out = (sc.exe start $svc.Name 2>&1 | Out-String)
+        if ($out -match 'FAILED\s+(\d+)') {
+            Write-WatchdogLog "Start failed with error $($Matches[1]). See the Windows event log and run collect-diagnostics.ps1."
+        }
+    }
     Set-FailureCount 0
     return
 }
@@ -1523,7 +1625,15 @@ const svc = new Service({
         { name: 'XP_CONFIG_PATH', value: '$($InstallPath -replace '\\', '/')' + '/config.json' },
         { name: 'NODE_ENV', value: 'production' }
     ],
-    maxRestarts: 10,
+    // A till must come back no matter how many times it has failed today.
+    // node-windows counts restarts in a rolling 60-second window and then stops
+    // respawning permanently. At the old value of 10, a service crash-looping
+    // on something fixable - a stale lock, a busy port - burned through the
+    // budget in under a minute and then stayed down until a human noticed,
+    // which is indistinguishable from "the service will not start". Windows'
+    // own recovery is the backstop, but it only fires when the WRAPPER dies,
+    // not when the wrapper is alive and has given up on its child.
+    maxRestarts: 100,
     wait: 5,
     grow: 0.5,
     abortOnError: false
@@ -1601,7 +1711,7 @@ svc.install();
         <argument>--wait</argument>
         <argument>5</argument>
         <argument>--maxrestarts</argument>
-        <argument>10</argument>
+        <argument>100</argument>
         <argument>--abortonerror</argument>
         <argument>n</argument>
         <argument>--stopparentfirst</argument>

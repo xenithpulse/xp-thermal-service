@@ -152,4 +152,89 @@ describe('InstanceLock', () => {
     expect(result.acquired).toBe(false);
     expect(result.reason).toMatch(/did not exit within/i);
   });
+
+  /**
+   * The client-site failure this guard caused rather than prevented.
+   *
+   * The service is killed hard, the lock survives with a PID in it, the box
+   * reboots, and Windows hands that same PID to something else. A PID-only
+   * check then reads "another copy is running" and the service exits four
+   * seconds after every start - through a reinstall, because the lock lives in
+   * the data directory the installer preserves.
+   */
+  describe('a lock that outlived its owner', () => {
+    /** A pid that IS alive, standing in for the unrelated process that inherited it. */
+    const REUSED_PID = process.pid;
+
+    function writeLockAt(pid: number, startedAt: Date, heartbeatAt?: Date): void {
+      const info: Record<string, unknown> = {
+        pid,
+        startedAt: startedAt.toISOString(),
+        script: 'x'
+      };
+      if (heartbeatAt) info.heartbeatAt = heartbeatAt.toISOString();
+      fs.writeFileSync(lockPath, JSON.stringify(info), 'utf8');
+    }
+
+    it('takes over a lock written before the machine booted, live pid or not', async () => {
+      // Older than uptime, so it cannot belong to anything running now.
+      const beforeBoot = new Date(Date.now() - (os.uptime() * 1000 + 10 * 60_000));
+      writeLockAt(REUSED_PID, beforeBoot);
+
+      const result = await new InstanceLock(lockPath).acquire(undefined, 0);
+
+      expect(result.acquired).toBe(true);
+      expect(result.reason).toMatch(/before this machine last booted/i);
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
+    });
+
+    it('takes over a lock whose heartbeat has gone cold', async () => {
+      // Same boot, live pid, but the owner stopped updating it three minutes
+      // ago - so the owner is gone and the pid belongs to someone else.
+      writeLockAt(REUSED_PID, new Date(Date.now() - 5 * 60_000), new Date(Date.now() - 3 * 60_000));
+
+      const result = await new InstanceLock(lockPath).acquire(undefined, 0);
+
+      expect(result.acquired).toBe(true);
+      expect(result.reason).toMatch(/stopped updating it/i);
+    });
+
+    it('still stands down for an owner that is beating', async () => {
+      // The guarantee this class exists for has to survive the fix.
+      writeLockAt(REUSED_PID, new Date(Date.now() - 5 * 60_000), new Date());
+
+      const result = await new InstanceLock(lockPath).acquire(undefined, 0);
+
+      expect(result.acquired).toBe(false);
+      expect(result.reason).toMatch(/already running/i);
+    });
+
+    it('refreshes its own heartbeat so the next start can tell it is alive', async () => {
+      const lock = new InstanceLock(lockPath);
+      await lock.acquire(undefined, 0);
+
+      const first = JSON.parse(fs.readFileSync(lockPath, 'utf8')).heartbeatAt;
+      expect(first).toBeTruthy();
+
+      lock.startHeartbeat(50);
+      await new Promise((resolve) => setTimeout(resolve, 160));
+      const second = JSON.parse(fs.readFileSync(lockPath, 'utf8')).heartbeatAt;
+      lock.release();
+
+      expect(Date.parse(second)).toBeGreaterThan(Date.parse(first));
+    });
+
+    it('stops beating rather than stamping over a lock another process took', async () => {
+      const lock = new InstanceLock(lockPath);
+      await lock.acquire(undefined, 0);
+      lock.startHeartbeat(50);
+
+      // A replacement decided this one was abandoned and claimed the lock.
+      writeLockAt(DEAD_PID, new Date(), new Date());
+      await new Promise((resolve) => setTimeout(resolve, 160));
+
+      expect(JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid).toBe(DEAD_PID);
+      lock.release();
+    });
+  });
 });
