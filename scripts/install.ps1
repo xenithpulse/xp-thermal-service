@@ -359,6 +359,55 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+<#
+    Run a JavaScript program with the system node, WITHOUT going through
+    "node -e".
+
+    WHY THIS EXISTS. Windows PowerShell 5.1 builds the command line for a native
+    executable by wrapping each argument in double quotes, and it does NOT
+    escape double quotes that are already inside the argument. So the first `"`
+    in a script passed to `node -e` ENDS the argument. Node receives a truncated
+    program, and everything after that point is handed to it as unrelated extra
+    argv entries, which -e ignores.
+
+    It fails in two ways and the quiet one is worse:
+
+      - If the cut lands mid-expression, node reports a SyntaxError whose line
+        number and text point at a COMMENT, which sends you looking for a
+        problem in prose. That is what happened here (2026-08-12, real install):
+        the maxRestarts comment block was the first thing in this file to
+        contain a double quote, and service registration started failing with
+          [eval]:19
+          // which is indistinguishable from the
+          SyntaxError: Unexpected end of input
+        The install still "succeeded" because the sc.exe fallback below caught
+        it, so the only visible symptom was a warning scrolling past.
+
+      - If the cut lands after a complete statement, node exits 0 having run
+        HALF the program. Measured: a three-line script whose second line held a
+        quoted comment ran, printed nothing, and exited 0.
+
+    A temp file has no quoting rules at all, so this cannot come back. Do not
+    "simplify" it back to node -e.
+#>
+function Invoke-NodeScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$Script,
+        [string]$Name = 'xp-thermal'
+    )
+
+    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("{0}-{1}.js" -f $Name, [guid]::NewGuid().ToString('N'))
+    try {
+        # No BOM: node tolerates one, but a stray BOM in a generated file is the
+        # kind of thing that turns into a different afternoon later.
+        [System.IO.File]::WriteAllText($tempFile, $Script, (New-Object System.Text.UTF8Encoding $false))
+        return (& node $tempFile 2>&1)
+    }
+    finally {
+        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-WithRetry {
     param(
         [ScriptBlock]$ScriptBlock,
@@ -1668,7 +1717,10 @@ svc.on('error', (err) => {
 svc.install();
 "@
         
-        $result = & node -e $nodeScript 2>&1
+        # NOT "node -e": the comment block above contains double quotes, and
+        # PowerShell 5.1 truncates a native argument at the first one. See
+        # Invoke-NodeScript.
+        $result = Invoke-NodeScript -Script $nodeScript -Name 'xp-thermal-register'
         $resultStr = $result -join "`n"
         
         if ($resultStr -match "SERVICE_INSTALLED|SERVICE_STARTED|SERVICE_ALREADY_INSTALLED") {
@@ -1782,6 +1834,45 @@ svc.install();
                 if ($svcCheck) {
                     Write-OK "Service registered via fallback"
                     Write-Log "Service registered via fallback as: $($svcCheck.Name)"
+
+                    <#
+                        SAY WHAT THIS FALLBACK DOES NOT DO.
+
+                        node-windows GENERATES the wrapper descriptor - the
+                        <argument> list carrying --maxrestarts, --wait,
+                        --max-old-space-size and the environment. This path does
+                        not: winsw and sc.exe both register whatever descriptor
+                        is ALREADY on disk. If one is left over from an earlier
+                        install, the service comes up green on the OLD settings
+                        and the installer reports success.
+
+                        Measured on the dev box, 2026-08-12: registration had
+                        been falling back for months because of the node -e
+                        truncation bug, and the live descriptor was five months
+                        old - maxrestarts 3 instead of 100, wait 2 instead of 5,
+                        a 256 MB heap cap instead of 512, no XP_CONFIG_PATH, and
+                        an <executable> pointing at a system Node. Every one of
+                        those is a setting somebody deliberately changed and
+                        nobody received.
+
+                        A running service is the right outcome here. Pretending
+                        it is a fully configured one is not.
+                    #>
+                    $descriptor = [System.IO.Path]::ChangeExtension($daemonExe, '.xml')
+                    if (Test-Path $descriptor) {
+                        $descAge = (Get-Item $descriptor).LastWriteTime
+                        if ($descAge -lt (Get-Date).AddMinutes(-10)) {
+                            Write-WARN "The service kept its PREVIOUS configuration."
+                            Write-Log "Fallback registration reused a stale descriptor: $descriptor (last written $descAge)" "WARNING"
+                            Write-Dot "  $descriptor"
+                            Write-Dot "  last written $($descAge.ToString('yyyy-MM-dd HH:mm')) - not by this install."
+                            Write-Dot "  Restart limits, memory caps and environment settings from this"
+                            Write-Dot "  release have NOT been applied. Re-run this installer once the"
+                            Write-Dot "  node-windows registration above succeeds, or delete the file"
+                            Write-Dot "  and re-run to force it to be regenerated."
+                        }
+                    }
+
                     sc.exe start $svcCheck.Name 2>&1 | Out-Null
                     Start-Sleep -Seconds 5
                 }
@@ -1994,7 +2085,10 @@ svc.on('error', () => {});
 svc.uninstall();
 setTimeout(() => process.exit(0), 5000);
 "@
-            & node -e $uninstallScript 2>&1 | Out-Null
+            # Same reason as the registration script - see Invoke-NodeScript.
+            # This one carries no double quotes today, which is precisely why it
+            # would break the first time somebody added a message to it.
+            Invoke-NodeScript -Script $uninstallScript -Name 'xp-thermal-uninstall' | Out-Null
         }
         catch { }
         finally {
