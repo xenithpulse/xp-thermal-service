@@ -879,6 +879,61 @@ function Set-ConfigPrivateNetworkAccess {
                 Write-Log "Removed wildcard from allowedOrigins for security"
             }
 
+            <#
+                D3 / LINK-01. ADD this site's real origins, do not only remove.
+
+                Until now this function only ever REMOVED a wildcard. Nothing
+                ever added the origin the site actually uses, and the shipped
+                config.example.json does not contain it either:
+
+                    allowedOrigins: localhost:3000, 127.0.0.1:3000,
+                                    localhost:3001, 127.0.0.1:3001, vercel
+                    allowPrivateNetwork: (unset)
+
+                OriginPolicy trusts loopback on any port and this machine's own
+                IP addresses without configuration, so 127.0.0.1, localhost and
+                the LAN IP all work regardless. But the address every site
+                actually uses is the desktop shortcut,
+                http://pos.xenithpulse.local:<port>, and that is a NAME - not
+                loopback, not one of this machine's addresses. It falls through
+                to the configured list, is absent from it, and is refused.
+
+                Measured against the real compiled OriginPolicy, 2026-08-16:
+
+                  FRESH INSTALL   pos.xenithpulse.local:8090  -> DENY
+                  THIS DEV BOX    pos.xenithpulse.local:8090  -> ALLOW
+                                  ("Listed in allowedOrigins")
+
+                The dev box passes only because its config.json is a preserved,
+                hand-edited file - install.ps1 never overwrites an existing one.
+                A genuinely fresh box cannot print from its own shortcut.
+
+                DEEP-QA-PLAN.md records the opposite ("works by luck ... happen
+                to be in the shipped list"). They are not in the shipped list.
+
+                A port wildcard is used rather than a fixed port because
+                provisioning moves the POS off 8080 when it is taken, and this
+                installer cannot know what it settled on. The service binds
+                127.0.0.1 only - verified - so nothing off this machine can
+                reach the API to present any origin at all.
+            #>
+            $localName = 'pos.xenithpulse.local'   # matches LOCAL_NAME in the POS
+            $required = @("http://$localName`:*", "https://$localName`:*")
+
+            $origins = [System.Collections.ArrayList]@($config.security.allowedOrigins)
+            $addedOrigin = $false
+            foreach ($needed in $required) {
+                if ($origins -notcontains $needed) {
+                    [void]$origins.Add($needed)
+                    $addedOrigin = $true
+                }
+            }
+            if ($addedOrigin) {
+                $config.security.allowedOrigins = $origins.ToArray()
+                Write-Dot "Added this site's origin ($localName, any port)"
+                Write-Log "Added $localName origins to allowedOrigins - the desktop shortcut could not print without them (D3/LINK-01)"
+            }
+
             # Generate API key if enableApiKey is true but no key is set
             if ($config.security.enableApiKey -and (-not $config.security.apiKey)) {
                 $bytes = New-Object byte[] 32

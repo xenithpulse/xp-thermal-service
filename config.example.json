@@ -10,7 +10,9 @@
       "http://127.0.0.1:3000",
       "http://localhost:3001",
       "http://127.0.0.1:3001",
-      "https://xp-pos.vercel.app"
+      "https://xp-pos.vercel.app",
+      "http://pos.xenithpulse.local:*",
+      "https://pos.xenithpulse.local:*"
     ],
     "allowedHosts": [
       "localhost",
