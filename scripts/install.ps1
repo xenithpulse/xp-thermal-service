@@ -389,14 +389,36 @@ function Test-Administrator {
 
     A temp file has no quoting rules at all, so this cannot come back. Do not
     "simplify" it back to node -e.
+
+    WHERE THE FILE GOES IS PART OF THE FIX, not an implementation detail.
+
+    `node -e` resolves require() against the CURRENT DIRECTORY. A script file
+    resolves it against the SCRIPT'S OWN directory. So the first version of this
+    helper wrote to %TEMP%, and registration then failed with:
+
+        Error: Cannot find module 'node-windows'
+        Require stack:
+        - C:\Users\DELL\AppData\Local\Temp\xp-thermal-register-<guid>.js
+
+    That is a regression this helper introduced while fixing the truncation: the
+    quoting problem was gone and the module resolution broke in its place. The
+    file must therefore live in the directory that OWNS node_modules, which is
+    the install path - never %TEMP%.
 #>
 function Invoke-NodeScript {
     param(
         [Parameter(Mandatory = $true)][string]$Script,
-        [string]$Name = 'xp-thermal'
+        [string]$Name = 'xp-thermal',
+        # Defaults to the install path because that is where node_modules is.
+        [string]$WorkingDirectory = $InstallPath
     )
 
-    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("{0}-{1}.js" -f $Name, [guid]::NewGuid().ToString('N'))
+    if (-not $WorkingDirectory -or -not (Test-Path $WorkingDirectory)) {
+        $WorkingDirectory = [System.IO.Path]::GetTempPath()
+        Write-Log "Invoke-NodeScript: falling back to TEMP - require() may not resolve" "WARNING"
+    }
+
+    $tempFile = Join-Path $WorkingDirectory ("{0}-{1}.js" -f $Name, [guid]::NewGuid().ToString('N'))
     try {
         # No BOM: node tolerates one, but a stray BOM in a generated file is the
         # kind of thing that turns into a different afternoon later.
@@ -1732,10 +1754,57 @@ svc.install();
             Write-Log "node-windows registration result: $resultStr" "WARNING"
         }
         
-        Start-Sleep -Seconds 3
-        
+        <#
+            svc.install() is ASYNCHRONOUS, so give the SCM a moment to make the
+            service enumerable before Get-Service below decides it is absent.
+
+            MEASURED, 2026-08-16, and worth writing down because it changes what
+            "successful" means here: on this box node-windows emits its 'install'
+            event - so the check above prints "registration successful" - and the
+            service STILL never appears in the SCM. Polling for twenty seconds
+            changed nothing; the sc.exe/winsw fallback below is what actually
+            registers it, on every run.
+
+            So the fallback is the NORMAL path here, not the exceptional one, and
+            the pair of log lines ("registration successful" followed by
+            "node-windows did not register service") are both accurate and
+            together unreadable. Left short deliberately: a longer wait is twenty
+            seconds added to every install for an outcome that does not arrive.
+
+            The end state is correct either way now that the descriptor is
+            regenerated properly - but do not read "node-windows registration
+            successful" as meaning the service exists. Only Get-Service does.
+        #>
+        $registerDeadline = (Get-Date).AddSeconds(6)
+        while ((Get-Date) -lt $registerDeadline) {
+            if ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -or
+                (Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+
         # Verify the daemon XML has correct install paths (not dev paths)
-        $daemonXml = "$InstallPath\daemon\$ServiceName.xml"
+        <#
+            ChangeExtension, NOT "$ServiceName.xml".
+
+            $ServiceName is "xpthermalprintservice.exe" - node-windows derives
+            the service key from the display name and appends .exe. So the
+            string form built "xpthermalprintservice.exe.xml", which has never
+            existed on any machine. Test-Path was therefore always false and
+            THIS ENTIRE REPAIR BLOCK HAS NEVER EXECUTED, on any installation,
+            since it was written.
+
+            That is why the dev box ran a descriptor dated 19-Mar-26 pointing at
+            E:\xp-thermal-service with --maxrestarts 3: the code whose whole
+            purpose is to detect dev paths and regenerate the descriptor could
+            not find the file it was meant to inspect. It is also why INST-31
+            and INST-34 read as open failures - the repair for them existed and
+            was dead.
+
+            Verified on the box 2026-08-16:
+              built  -> ...\daemon\xpthermalprintservice.exe.xml   Test-Path False
+              actual -> ...\daemon\xpthermalprintservice.xml       Test-Path True
+        #>
+        $daemonXml = [System.IO.Path]::ChangeExtension("$InstallPath\daemon\$ServiceName", '.xml')
         if (Test-Path $daemonXml) {
             $xmlContent = Get-Content $daemonXml -Raw
             $installPathFwd = $InstallPath -replace '\\', '/'
