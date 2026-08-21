@@ -23,6 +23,7 @@ import { buildRoleConfig, isPrinterRole, listRoles } from '../printers/printer-r
 import { findByName } from '../printers/windows-printers';
 import { OriginPolicy } from './origin-policy';
 import { cashDrawerPulse } from '../escpos/builder';
+import { decideHealth } from './health-verdict';
 import {
   PrintRequest,
   PrintResponse,
@@ -483,19 +484,42 @@ export class ApiServer {
     try {
       const printerSummary = this.printerManager.getSummary();
       const queueStats = this.queue.getStats();
+      const stall = this.queue.getStallSignal();
 
-      const status: 'healthy' | 'initializing' =
-        printerSummary.initializing ? 'initializing' : 'healthy';
+      /*
+       * D31. The old rule was:
+       *
+       *     status = printerSummary.initializing ? 'initializing' : 'healthy'
+       *
+       * which is a LIVENESS check wearing the word "health". It answers "is
+       * this process up", and the process was up for all fourteen of the hours
+       * in which it printed nothing.
+       *
+       * decideHealth answers "can this service do its job" instead - a
+       * different question with a different answer, and the only one worth
+       * publishing. Every input it takes was already in this handler's hands;
+       * nothing new had to be measured to stop lying.
+       */
+      const { status, reasons } = decideHealth({
+        printers: printerSummary,
+        queue: {
+          deadLetter: stall.deadLetter,
+          oldestPendingAgeMs: stall.oldestPendingAgeMs
+        }
+      });
 
       const response: HealthResponse = {
         status,
+        reasons,
         uptime: Date.now() - this.startTime,
         version: '1.0.0',
         printers: printerSummary,
         queue: {
           pending: queueStats.pending,
           processing: queueStats.processing,
-          failed: queueStats.failed
+          failed: queueStats.failed,
+          deadLetter: stall.deadLetter,
+          oldestPendingAgeMs: stall.oldestPendingAgeMs
         }
       };
 
@@ -508,14 +532,24 @@ export class ApiServer {
         configuredPort: this.config.port
       });
     } catch (error) {
-      // Native module crash (e.g. better-sqlite3 "memory access out of bounds")
-      // Return degraded status so the watchdog can detect and restart the process
-      this.logger.error({ error: error instanceof Error ? error.message : error }, 'Health check internal error');
+      // Native module crash (e.g. the sql.js WASM going "memory access out of
+      // bounds"). If the health check itself cannot complete, the queue store
+      // underneath it is unusable and nothing sent here will be recorded, let
+      // alone printed.
+      //
+      // This used to answer 'degraded'. Under the Layer 5 model that is the
+      // wrong word: degraded means "accepting work it cannot yet complete",
+      // and this service cannot accept work at all. 'unhealthy' is what tells
+      // the watchdog to restart the process rather than wait for a printer to
+      // come back on its own.
+      const message = error instanceof Error ? error.message : 'Internal health check failure';
+      this.logger.error({ error: message }, 'Health check internal error');
       res.status(503).json({
-        status: 'degraded',
+        status: 'unhealthy',
+        reasons: [`The health check itself failed, so the job store is unusable: ${message}`],
         uptime: Date.now() - this.startTime,
         version: '1.0.0',
-        error: error instanceof Error ? error.message : 'Internal health check failure'
+        error: message
       });
     }
   }

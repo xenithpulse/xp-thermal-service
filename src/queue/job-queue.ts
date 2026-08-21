@@ -270,6 +270,19 @@ export class JobQueue extends EventEmitter {
   }
 
   /**
+   * Dead-letter count and the age of the oldest unfinished job. Phase 4,
+   * Layer 5 - the two facts /api/health needs to tell the truth about whether
+   * this queue is actually draining. See JobStore.getStallSignal.
+   *
+   * Kept separate from getStats() rather than folded into it, because
+   * getStats() is on the hot path (the queue calls it while deciding what to
+   * process) and this one runs a MIN() across the table.
+   */
+  getStallSignal(): { deadLetter: number; oldestPendingAgeMs: number | null } {
+    return this.store.getStallSignal();
+  }
+
+  /**
    * Pause queue processing
    */
   pause(): void {

@@ -534,6 +534,55 @@ export class JobStore {
   }
 
   /**
+   * The two facts getCounts() cannot express, and health needs. Phase 4,
+   * Layer 5.
+   *
+   * DEAD LETTERS. getCounts() counts status='failed' only. A job that has
+   * exhausted its retries is 'dead_letter', so during the 24-hour soak this
+   * table held 272 of them and every health sample said `failed: 0`. Work that
+   * will never print is exactly what an operator needs told about.
+   *
+   * THE OLDEST WAITING JOB. "Is the queue draining?" cannot be answered from a
+   * depth: 40 pending jobs is a busy Friday if they are seconds old and a dead
+   * printer if the oldest is an hour old. The age answers it directly, needs no
+   * sampling history, and is true the moment it is asked.
+   *
+   * Both in one query, because health is polled every few seconds by the
+   * dashboard and this runs on a 4 GB box.
+   */
+  getStallSignal(): { deadLetter: number; oldestPendingAgeMs: number | null } {
+    if (!this.db) return { deadLetter: 0, oldestPendingAgeMs: null };
+
+    return this.safeDbOp(() => {
+      // 'unfinished' is every status that still owes a piece of paper:
+      // waiting to start, scheduled for retry, or claimed by a worker. A job
+      // wedged in 'processing' forever is a stall too - arguably the worst
+      // kind, since something believes it is being handled.
+      const result = this.db!.exec(`
+        SELECT
+          SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END) AS dead_letter,
+          MIN(CASE WHEN status IN ('pending','queued','retry_scheduled','processing','printing')
+                   THEN created_at END) AS oldest_unfinished
+        FROM jobs
+      `);
+
+      if (result.length === 0 || result[0].values.length === 0) {
+        return { deadLetter: 0, oldestPendingAgeMs: null };
+      }
+
+      const row = result[0].values[0];
+      const oldest = row[1] as number | null;
+
+      return {
+        deadLetter: (row[0] as number) || 0,
+        // Clamped at zero: a clock adjustment must not produce a negative age
+        // that reads as "printed before it was queued".
+        oldestPendingAgeMs: oldest ? Math.max(0, Date.now() - oldest) : null
+      };
+    });
+  }
+
+  /**
    * Mark job as started
    */
   markStarted(id: string): void {

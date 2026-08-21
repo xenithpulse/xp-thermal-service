@@ -425,20 +425,77 @@ export interface PrinterListResponse {
   printers: PrinterInfo[];
 }
 
+/**
+ * Health as CAPABILITY, not liveness. Phase 4, Layer 5, and the fix for D31.
+ *
+ * A 24-hour soak recorded this on every sample of a 15-minute window, with the
+ * printers physically connected:
+ *
+ *     printer_state: kitchen=error | cashier=error | usb-receipt=offline
+ *     print_status:  healthy
+ *
+ * The old shape is why. `status` could only ever be 'healthy' or
+ * 'initializing', so once initialisation finished there was NO VALUE the
+ * service could return that meant "I am running and I cannot print". The
+ * information existed - getSummary() has counted printers in an `error` state
+ * all along - and this interface threw it away.
+ *
+ * That is how a till printed nothing for fourteen hours and reported itself
+ * well throughout.
+ *
+ *   healthy      can accept work AND can complete it
+ *   degraded     accepting work it cannot currently complete
+ *                  (no printer online, a printer in error, queue not draining)
+ *   unhealthy    cannot accept work at all
+ *   initializing not ready yet - transient, and not a fault
+ */
+export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy' | 'initializing';
+
 export interface HealthResponse {
-  status: 'healthy' | 'initializing';
+  status: HealthStatus;
+  /**
+   * Why the status is not 'healthy', in words meant for a person - the
+   * connection card, qa-check and the watchdog log all surface these verbatim.
+   * Empty when healthy.
+   */
+  reasons: string[];
   uptime: number;
   version: string;
   printers: {
     total: number;
     online: number;
     offline: number;
+    /**
+     * Printers in a fault state (paper out, cover open, unreachable). Counted
+     * by getSummary() since before D31 was found, and omitted from this
+     * interface until Layer 5 - which is precisely why nothing noticed.
+     */
+    error: number;
     initializing: boolean;
   };
   queue: {
     pending: number;
     processing: number;
     failed: number;
+    /**
+     * Jobs that exhausted their retries and will never print. getCounts()
+     * counts only status='failed', so this was reported as 0 while `jobs.db`
+     * held 272 dead-lettered jobs (D30). A queue full of work that can never
+     * complete is not a healthy queue, and it must be visible to say so.
+     */
+    deadLetter: number;
+    /**
+     * How long the oldest unfinished job has been waiting, in ms, or null when
+     * nothing is waiting.
+     *
+     * This is the stall signal, and it is deliberately stateless. The Phase 4
+     * invariant is "if the queue has grown for N consecutive minutes with zero
+     * completions, health is not healthy" - which needs a sampler, and
+     * therefore only notices when something happens to be polling. Asking how
+     * old the oldest waiting job is answers the same question from a single
+     * query, at any moment, whether or not anyone has been watching.
+     */
+    oldestPendingAgeMs: number | null;
   };
 }
 
