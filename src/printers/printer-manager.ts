@@ -34,6 +34,69 @@ export interface PrinterManagerConfig {
   autoHeal?: boolean;
 }
 
+/**
+ * Which bucket does each printer state belong in?
+ *
+ * Pure and exported so it can be proven directly, the way classifyStatus in
+ * printer-resolver is. It used to be a switch inside getSummary ending in a
+ * bare `default: error++`, and that catch-all is what hid the defect below.
+ *
+ * BUSY IS A WORKING PRINTER. Found by the 4-hour verification soak, which
+ * measured, over 240 samples on a real run:
+ *
+ *     printer_state : receipt=busy   236 samples
+ *     print_status  : degraded       236 samples
+ *     prints        : 214 ok, 0 failed
+ *
+ * The service spent the whole run reporting "running, but it cannot print"
+ * while it printed 214 receipts, because BUSY - the state a printer is in
+ * BECAUSE it is printing - fell through to the error bucket. Nothing noticed
+ * before Phase 4 Layer 5, because until then nothing drew a verdict from these
+ * counts. Now health does, and an operator would have watched a red panel
+ * through a working lunch service. A status that cries wolf is one people learn
+ * to ignore, which is worse than having no status at all.
+ *
+ * Every state is named explicitly. A bucket nobody chose, doing the most
+ * alarming thing available, is how this happened.
+ */
+export function bucketPrinterStates(
+  statuses: PrinterStatus[]
+): { online: number; offline: number; error: number } {
+  let online = 0;
+  let offline = 0;
+  let error = 0;
+
+  for (const status of statuses) {
+    switch (status) {
+      case PrinterStatus.ONLINE:
+      case PrinterStatus.BUSY:
+        online++;
+        break;
+
+      case PrinterStatus.OFFLINE:
+      case PrinterStatus.UNKNOWN:
+        offline++;
+        break;
+
+      // The three that genuinely mean "connected and cannot print". These are
+      // the ones worth telling somebody about.
+      case PrinterStatus.ERROR:
+      case PrinterStatus.PAPER_OUT:
+      case PrinterStatus.COVER_OPEN:
+        error++;
+        break;
+
+      default:
+        // Unreachable while PrinterStatus is fully enumerated above. Kept so
+        // that adding a state without deciding its bucket lands somewhere
+        // deliberate rather than wherever the switch happened to fall.
+        error++;
+    }
+  }
+
+  return { online, offline, error };
+}
+
 export class PrinterManager extends EventEmitter {
   private printers: Map<string, PrinterAdapter> = new Map();
   private configs: Map<string, PrinterConfig> = new Map();
@@ -722,29 +785,14 @@ export class PrinterManager extends EventEmitter {
     error: number;
     initializing: boolean;
   } {
-    let online = 0;
-    let offline = 0;
-    let error = 0;
-
-    for (const adapter of this.printers.values()) {
-      switch (adapter.state.status) {
-        case PrinterStatus.ONLINE:
-          online++;
-          break;
-        case PrinterStatus.OFFLINE:
-        case PrinterStatus.UNKNOWN:
-          offline++;
-          break;
-        default:
-          error++;
-      }
-    }
-
+    const counts = bucketPrinterStates(
+      [...this.printers.values()].map((adapter) => adapter.state.status)
+    );
     return {
       total: this.printers.size,
-      online,
-      offline,
-      error,
+      online: counts.online,
+      offline: counts.offline,
+      error: counts.error,
       initializing: this._initializing
     };
   }
