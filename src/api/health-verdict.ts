@@ -39,6 +39,16 @@ export interface HealthVerdictInput {
     online: number;
     offline: number;
     error: number;
+    /**
+     * Printers reporting BUSY. A SUBSET of `error`, not an addition to it.
+     *
+     * BUSY is what this hardware reports both while printing and while blocked
+     * with no paper, and nothing available to this service tells the two apart
+     * — see bucketPrinterStates. It counts as a fault, because a false amber
+     * costs a glance and a false green costs a dinner service, but the wording
+     * below has to admit what is actually known.
+     */
+    busy?: number;
     initializing: boolean;
   };
   queue: {
@@ -87,10 +97,20 @@ export function decideHealth(input: HealthVerdictInput): HealthVerdict {
     // forever. Say it, do not escalate it.
     reasons.push('No printers are configured, so nothing sent here can print.');
   } else if (printers.online === 0) {
-    reasons.push(
-      `None of the ${printers.total} configured printer(s) are online ` +
-      `(${printers.error} in error, ${printers.offline} offline).`
-    );
+    const busy = printers.busy ?? 0;
+    if (busy > 0 && busy === printers.error && printers.offline === 0) {
+      // Every fault is a BUSY, which is the ambiguous one. Say what is known
+      // and what is not, rather than asserting a jam that may be a rush.
+      reasons.push(
+        `${busy} printer(s) report BUSY. That means either printing or blocked — ` +
+        'commonly out of paper — and the printer does not distinguish them. Check the paper.'
+      );
+    } else {
+      reasons.push(
+        `None of the ${printers.total} configured printer(s) are online ` +
+        `(${printers.error} in error, ${printers.offline} offline).`
+      );
+    }
     cannotComplete = true;
   } else if (printers.error > 0) {
     // Some printers work and some do not: receipts print and the kitchen gets

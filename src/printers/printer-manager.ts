@@ -39,37 +39,49 @@ export interface PrinterManagerConfig {
  *
  * Pure and exported so it can be proven directly, the way classifyStatus in
  * printer-resolver is. It used to be a switch inside getSummary ending in a
- * bare `default: error++`, and that catch-all is what hid the defect below.
+ * bare `default: error++`; the catch-all is gone because a bucket nobody chose
+ * is how a state ends up somewhere nobody intended.
  *
- * BUSY IS A WORKING PRINTER. Found by the 4-hour verification soak, which
- * measured, over 240 samples on a real run:
+ * ── BUSY IS NOT EVIDENCE OF ANYTHING, AND THAT IS THE POINT ────────────────
  *
- *     printer_state : receipt=busy   236 samples
- *     print_status  : degraded       236 samples
- *     prints        : 214 ok, 0 failed
+ * BUSY was briefly moved to `online` on the strength of the 4-hour run, which
+ * showed `receipt=busy` for 236 of 240 samples alongside "214 prints ok, 0
+ * failed". That reasoning was wrong and the change is reverted.
  *
- * The service spent the whole run reporting "running, but it cannot print"
- * while it printed 214 receipts, because BUSY - the state a printer is in
- * BECAUSE it is printing - fell through to the error bucket. Nothing noticed
- * before Phase 4 Layer 5, because until then nothing drew a verdict from these
- * counts. Now health does, and an operator would have watched a red panel
- * through a working lunch service. A status that cries wolf is one people learn
- * to ignore, which is worse than having no status at all.
+ * What actually happened on that run: the operator pulled the paper roll out
+ * early on and left the printer connected. `prints_ok` counts jobs the soak
+ * SUBMITTED and the service ACCEPTED - it is an HTTP result, not a receipt. The
+ * queue drained to `pending: 0` at every single sample while 408 jobs passed
+ * through it, and nothing came out of the printer at all.
  *
- * Every state is named explicitly. A bucket nobody chose, doing the most
- * alarming thing available, is how this happened.
+ * So a Windows print queue will happily consume, complete and discard jobs for
+ * a thermal printer with no paper in it, reporting BUSY throughout. Draining is
+ * not printing. This repo already knew the neighbouring version of that lesson:
+ * see printer-resolver's fixture for the "Generic / Text Only" queue that
+ * reports WorkOffline=true while printing perfectly.
+ *
+ * Which leaves BUSY genuinely ambiguous - it is what this hardware reports both
+ * when printing and when blocked - and no signal available to this service can
+ * separate the two. The queue-stall check cannot: the queue drained. So the bias
+ * has to be chosen deliberately, and Phase 4 already chose it:
+ *
+ *     No single failure may be both silent and permanent.
+ *
+ * A false amber costs someone a glance at the printer. A false green costs a
+ * dinner service. BUSY therefore counts as a fault, and health says so in words
+ * that admit the uncertainty rather than asserting a jam.
  */
 export function bucketPrinterStates(
   statuses: PrinterStatus[]
-): { online: number; offline: number; error: number } {
+): { online: number; offline: number; error: number; busy: number } {
   let online = 0;
   let offline = 0;
   let error = 0;
+  let busy = 0;
 
   for (const status of statuses) {
     switch (status) {
       case PrinterStatus.ONLINE:
-      case PrinterStatus.BUSY:
         online++;
         break;
 
@@ -78,23 +90,35 @@ export function bucketPrinterStates(
         offline++;
         break;
 
-      // The three that genuinely mean "connected and cannot print". These are
-      // the ones worth telling somebody about.
+      // Counted in `error` so the verdict is unchanged, and ALSO counted
+      // separately so health can word it honestly. "1 printer is busy - it may
+      // be printing, or it may be out of paper" sends somebody to look; "1
+      // printer is in a fault state" is a claim this service cannot support.
+      case PrinterStatus.BUSY:
+        busy++;
+        error++;
+        break;
+
+      // The three that unambiguously mean "connected and cannot print".
       case PrinterStatus.ERROR:
       case PrinterStatus.PAPER_OUT:
       case PrinterStatus.COVER_OPEN:
         error++;
         break;
 
-      default:
-        // Unreachable while PrinterStatus is fully enumerated above. Kept so
-        // that adding a state without deciding its bucket lands somewhere
-        // deliberate rather than wherever the switch happened to fall.
+      default: {
+        // A COMPILE error if a state is added to PrinterStatus without a
+        // decision here. The previous `default: error++` swallowed BUSY for
+        // years and nobody found out until a verdict was drawn from it; a
+        // silent bucket is worse than a build failure.
+        const unhandled: never = status;
+        void unhandled;
         error++;
+      }
     }
   }
 
-  return { online, offline, error };
+  return { online, offline, error, busy };
 }
 
 export class PrinterManager extends EventEmitter {
@@ -783,6 +807,8 @@ export class PrinterManager extends EventEmitter {
     online: number;
     offline: number;
     error: number;
+    /** Subset of `error`. See bucketPrinterStates: BUSY is ambiguous, not proven bad. */
+    busy: number;
     initializing: boolean;
   } {
     const counts = bucketPrinterStates(
@@ -793,6 +819,7 @@ export class PrinterManager extends EventEmitter {
       online: counts.online,
       offline: counts.offline,
       error: counts.error,
+      busy: counts.busy,
       initializing: this._initializing
     };
   }
