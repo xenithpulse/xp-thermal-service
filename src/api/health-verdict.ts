@@ -90,12 +90,34 @@ export function decideHealth(input: HealthVerdictInput): HealthVerdict {
   let cannotComplete = false;
 
   if (printers.total === 0) {
-    // A site with no printers configured is a legitimate deployment — plenty
-    // run the POS with no thermal printer at all — so this is not a fault, and
-    // reporting it as one would teach every such site to ignore this field.
-    // But it is not "can complete work" either: anything sent here queues
-    // forever. Say it, do not escalate it.
-    reasons.push('No printers are configured, so nothing sent here can print.');
+    /*
+     * A site with no printers configured is a legitimate deployment — plenty
+     * run the POS with no thermal printer at all — so on its own this is not a
+     * fault, and reporting it as one would teach every such site to ignore this
+     * field entirely.
+     *
+     * BUT NOT WHEN WORK IS ARRIVING ANYWAY. If jobs are being submitted to a
+     * service with nowhere to print them, they queue and then dead-letter, and
+     * "no printers configured" stops being a deployment choice and becomes a
+     * misconfiguration actively losing receipts.
+     *
+     * Without this branch the next 4-hour run — planned with the printer
+     * detached — would have reported `healthy` for four hours while several
+     * hundred jobs were abandoned, which is D31 rebuilt from new parts. The
+     * evidence for that is not hypothetical: the 2026-08-23 run put 619 jobs
+     * into dead_letter with the printer merely offline.
+     */
+    const abandoned = queue.deadLetter > 0;
+    const waiting = queue.oldestPendingAgeMs !== null;
+    if (abandoned || waiting) {
+      reasons.push(
+        'No printers are configured, yet print jobs are arriving — they cannot ' +
+        'be printed and are being abandoned. Configure a printer, or stop sending prints.'
+      );
+      cannotComplete = true;
+    } else {
+      reasons.push('No printers are configured, so nothing sent here can print.');
+    }
   } else if (printers.online === 0) {
     const busy = printers.busy ?? 0;
     if (busy > 0 && busy === printers.error && printers.offline === 0) {

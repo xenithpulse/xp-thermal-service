@@ -220,3 +220,36 @@ describe('no single failure may be both silent and permanent', () => {
     expect(verdict.reasons.length).toBeGreaterThan(0);
   });
 });
+
+// ─── No printers configured is only fine while nothing is being sent ─────────
+
+describe('no printers configured', () => {
+  const noPrinters = { total: 0, online: 0, offline: 0, error: 0, initializing: false };
+
+  it('is healthy on a site that genuinely does not print', () => {
+    const verdict = decideHealth({
+      printers: noPrinters,
+      queue: { deadLetter: 0, oldestPendingAgeMs: null }
+    });
+    expect(verdict.status).toBe('healthy');
+  });
+
+  it('is DEGRADED once jobs are being abandoned', () => {
+    // The 4-hour run planned with the printer detached. Without this, health
+    // reports healthy for four hours while every receipt is lost.
+    const verdict = decideHealth({
+      printers: noPrinters,
+      queue: { deadLetter: 619, oldestPendingAgeMs: null }
+    });
+    expect(verdict.status).toBe('degraded');
+    expect(verdict.reasons.join(' ')).toMatch(/print jobs are arriving/i);
+  });
+
+  it('is DEGRADED when jobs are sitting waiting with nowhere to go', () => {
+    const verdict = decideHealth({
+      printers: noPrinters,
+      queue: { deadLetter: 0, oldestPendingAgeMs: 30 * 1000 }
+    });
+    expect(verdict.status).toBe('degraded');
+  });
+});
