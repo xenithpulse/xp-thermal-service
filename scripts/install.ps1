@@ -53,6 +53,10 @@ $script:WatchdogSuspended = $false
 # start attempt so Get-DaemonFailureReason reads only what THIS run produced.
 $script:DaemonLogMark = $null
 
+# Detail about processes Stop-AllServiceProcesses could not terminate, so the
+# caller can explain the problem instead of just reporting that there was one.
+$script:StopFailure = $null
+
 # ============================================================
 # UI HELPERS
 # ============================================================
@@ -639,13 +643,45 @@ function Get-SelfAncestorPids {
     return $chain.ToArray()
 }
 
-# Every PID belonging to this service, however it is running.
-function Get-ServicePids {
-    $pids = New-Object System.Collections.Generic.List[int]
+# Which ports in our range is this process listening on? Reporting only.
+function Get-PortsForPid {
+    param([int]$ProcessId)
+
+    $ports = New-Object System.Collections.Generic.List[int]
+    try {
+        Get-NetTCPConnection -State Listen -ErrorAction Stop |
+            Where-Object {
+                [int]$_.OwningProcess -eq $ProcessId -and
+                [int]$_.LocalPort -ge $ServicePortStart -and
+                [int]$_.LocalPort -le $ServicePortEnd
+            } |
+            ForEach-Object {
+                $port = [int]$_.LocalPort
+                if (-not $ports.Contains($port)) { $ports.Add($port) }
+            }
+    }
+    catch { }
+    return $ports.ToArray()
+}
+
+<#
+    EVERY PROCESS BELONGING TO THIS SERVICE - AND HOW SURE WE ARE.
+
+    The certainty matters as much as the list. A surviving process that is
+    POSITIVELY ours holds the port and the instance lock, so a new copy cannot
+    start and there is no honest way to continue the install. A node process we
+    merely found listening on 9105 might just as easily be the customer's own
+    application, and refusing to install over that would be a worse bug than
+    the one being fixed - Step 5 can simply pick another port.
+
+    So: kill on suspicion, abort only on proof.
+#>
+function Get-ServiceProcessInfo {
     $installLeaf = Split-Path $InstallPath -Leaf
     $self = @(Get-SelfAncestorPids)
+    $found = @{}
 
-    # 1. The winsw daemons, and everything underneath them.
+    # 1. The winsw daemons and everything underneath them - unambiguous.
     $roots = @()
     try {
         $roots = @(Get-CimInstance Win32_Process -ErrorAction Stop |
@@ -657,7 +693,7 @@ function Get-ServicePids {
             ForEach-Object { [int]$_.Id })
     }
     foreach ($p in (Get-DescendantPids -RootPids $roots)) {
-        if (-not $pids.Contains([int]$p)) { $pids.Add([int]$p) }
+        $found[[int]$p] = @{ Ours = $true; Why = 'in the service process tree' }
     }
 
     # 2. node.exe running OUR script - matched on the command line, which is
@@ -665,27 +701,114 @@ function Get-ServicePids {
     try {
         Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction Stop |
             Where-Object { $_.CommandLine -and ($_.CommandLine -like "*$installLeaf*") } |
-            ForEach-Object {
-                $procId = [int]$_.ProcessId
-                if (-not $pids.Contains($procId)) { $pids.Add($procId) }
-            }
+            ForEach-Object { $found[[int]$_.ProcessId] = @{ Ours = $true; Why = 'node running the service script' } }
     }
     catch { }
 
-    # 3. Whoever is actually listening on the port range - the definitive
-    #    answer, and the one that catches an orphan whose parentage can no
-    #    longer be reconstructed. Restricted to our own executables: another
-    #    program legitimately using 9100 is a port clash to route around at
-    #    Step 5, not a process to kill.
+    # 3. Whoever is listening on the port range, if we can name them.
     foreach ($p in (Get-PortHolderPids)) {
-        if ($pids.Contains([int]$p)) { continue }
-        $proc = Get-Process -Id $p -ErrorAction SilentlyContinue
-        if ($proc -and $proc.Name -match '^(node|xpthermalprintservice|xpthermalservice)$') {
-            $pids.Add([int]$p)
+        $procId = [int]$p
+        if ($found.ContainsKey($procId)) { continue }
+
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        if ($proc.Name -notmatch '^(node|xpthermalprintservice|xpthermalservice)$') { continue }
+
+        $cmd = $null
+        try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop).CommandLine } catch { }
+
+        if ($cmd -and ($cmd -like "*$installLeaf*")) {
+            $found[$procId] = @{ Ours = $true; Why = 'node running the service script' }
+        }
+        else {
+            # Could be an orphan of ours whose parent is long gone, or could be
+            # somebody else's program. Not proof either way.
+            $found[$procId] = @{ Ours = $false; Why = 'unidentified listener in the service port range' }
         }
     }
 
-    return @($pids | Where-Object { $self -notcontains $_ })
+    $result = New-Object System.Collections.Generic.List[object]
+    foreach ($procId in @($found.Keys)) {
+        if ($self -contains $procId) { continue }
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        $result.Add([pscustomobject]@{
+            ProcessId = $procId
+            Name      = if ($proc) { $proc.Name } else { 'gone' }
+            Ours      = $found[$procId].Ours
+            Why       = $found[$procId].Why
+        })
+    }
+    return $result.ToArray()
+}
+
+function Get-ServicePids {
+    return @(Get-ServiceProcessInfo | ForEach-Object { $_.ProcessId })
+}
+
+<#
+    THREE WAYS TO KILL, AND KEEP THE REASON WHEN THEY FAIL.
+
+    taskkill /F /T is the right default - it takes descendants with it. The
+    previous code sent its output to $null, so when it failed the installer
+    knew only that a PID was still there, which is what "Could not terminate
+    node (PID 1340)" was: true, and useless.
+
+    The distinction that matters to whoever reads the log:
+
+      "Access is denied"      a privilege problem, worth another approach
+      accepted, still listed  the process is blocked in the kernel - a wedged
+                              device or driver I/O - and nothing short of a
+                              reboot will clear it
+
+    Stop-Process and the WMI terminate are genuinely different code paths and
+    one occasionally succeeds where taskkill does not, which is worth trying
+    before telling somebody to reboot a till in the middle of service.
+#>
+function Stop-ProcessHard {
+    param([int]$ProcessId)
+
+    $attempts = New-Object System.Collections.Generic.List[string]
+
+    # Through cmd, NOT "taskkill ... 2>&1".
+    #
+    # Redirecting a native command's stderr in PowerShell 5.1 wraps every line
+    # in an ErrorRecord, so the one sentence worth reading ("Reason: Access is
+    # denied.") arrives buried in "At line:6 char:13 + $out = (taskkill ..."
+    # and a stack of NativeCommandError decoration. cmd merges the streams
+    # before PowerShell ever sees them.
+    $out = (cmd /c "taskkill /F /T /PID $ProcessId 2>&1" | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        $why = @($out -split "`r?`n" |
+            Where-Object { $_ -match 'Reason:' } |
+            ForEach-Object { $_.Trim() } |
+            Select-Object -Unique |
+            Select-Object -First 2)
+        if ($why.Count -gt 0) { $attempts.Add("taskkill: $($why -join ' / ')") }
+        elseif ($out.Trim()) { $attempts.Add("taskkill: $($out.Trim())") }
+    }
+    Start-Sleep -Milliseconds 500
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $null }
+
+    try { Stop-Process -Id $ProcessId -Force -ErrorAction Stop }
+    catch { $attempts.Add("Stop-Process: $($_.Exception.Message)") }
+    Start-Sleep -Milliseconds 500
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $null }
+
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        if ($proc) {
+            $rc = (Invoke-CimMethod -InputObject $proc -MethodName Terminate -ErrorAction Stop).ReturnValue
+            if ($rc -ne 0) { $attempts.Add("WMI Terminate returned $rc") }
+        }
+    }
+    catch { $attempts.Add("WMI Terminate: $($_.Exception.Message)") }
+    Start-Sleep -Milliseconds 500
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $null }
+
+    if ($attempts.Count -eq 0) {
+        $attempts.Add("every terminate call was accepted and the process is still running - it is stuck in a kernel call, which only a reboot clears")
+    }
+    return ($attempts -join '; ')
 }
 
 # sc.exe stop returns as soon as the SCM accepts the request, not when the
@@ -766,6 +889,7 @@ function Clear-InstanceLock {
 
 function Stop-AllServiceProcesses {
     Write-Log "Stopping all service-related processes..."
+    $script:StopFailure = $null
 
     # Ask politely first, and WAIT. A graceful stop lets the service drain
     # in-flight receipts and release its own instance lock, which is the whole
@@ -796,7 +920,8 @@ function Stop-AllServiceProcesses {
     # which "taskkill /F /IM" never did.
     foreach ($procId in (Get-ServicePids)) {
         Write-Log "Terminating service process tree at PID $procId"
-        taskkill /F /T /PID $procId 2>$null | Out-Null
+        $err = Stop-ProcessHard -ProcessId $procId
+        if ($err) { Write-Log "PID ${procId} survived: $err" "WARNING" }
     }
 
     # Image-name sweep for anything the tree walk could not see (damaged WMI).
@@ -814,20 +939,39 @@ function Stop-AllServiceProcesses {
     # stops at Step 9" failure, and it was reported as "Stopped service
     # processes" with a tick next to it.
     $deadline = (Get-Date).AddSeconds(30)
-    $remaining = @(Get-ServicePids)
+    $remaining = @(Get-ServiceProcessInfo)
     while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        foreach ($procId in $remaining) { taskkill /F /T /PID $procId 2>$null | Out-Null }
+        foreach ($p in $remaining) { $null = Stop-ProcessHard -ProcessId $p.ProcessId }
         Start-Sleep -Seconds 2
-        $remaining = @(Get-ServicePids)
+        $remaining = @(Get-ServiceProcessInfo)
     }
 
     if ($remaining.Count -gt 0) {
-        foreach ($procId in $remaining) {
-            $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-            $desc = if ($p) { "$($p.Name) (PID $procId)" } else { "PID $procId" }
-            Write-Log "Could not terminate $desc" "ERROR"
+        $detail = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $remaining) {
+            $line = "$($p.Name) (PID $($p.ProcessId)) - $($p.Why)"
+            $ports = @(Get-PortsForPid -ProcessId $p.ProcessId)
+            if ($ports.Count -gt 0) { $line += ", listening on port $($ports -join ', ')" }
+            $reason = Stop-ProcessHard -ProcessId $p.ProcessId
+            if ($reason) { $line += "; $reason" }
+            $detail.Add($line)
+            Write-Log "Could not terminate $line" "ERROR"
         }
-        return $false
+
+        $blocking = @($remaining | Where-Object { $_.Ours })
+        $script:StopFailure = @{
+            Blocking = $blocking
+            All      = $remaining
+            Detail   = $detail.ToArray()
+        }
+
+        if ($blocking.Count -gt 0) { return $false }
+
+        # Nothing left that we can positively call ours. Whatever is holding a
+        # port is somebody else's program, so Step 5 routes around it rather
+        # than the installer refusing to run.
+        Write-Log "Survivors could not be identified as ours - continuing; Step 5 will choose a free port" "WARNING"
+        return $true
     }
 
     Write-Log "All service processes terminated; ports $ServicePortStart-$ServicePortEnd released"
@@ -2097,17 +2241,28 @@ function Invoke-ServiceInstall {
 
     if (Stop-AllServiceProcesses) {
         Write-Dot "Stopped service processes"
+
+        # Survived, but not ours - say so rather than staying silent about a
+        # process we tried to kill and could not.
+        if ($script:StopFailure) {
+            Write-WARN "Another program is using a port in the $ServicePortStart-$ServicePortEnd range"
+            foreach ($line in $script:StopFailure.Detail) { Write-Dot $line }
+            Write-Dot "It could not be identified as ours, so it has been left alone."
+            Write-Dot "Step 5 will choose a free port instead."
+        }
     }
     else {
         # Deploying over a live install is how the old files get half-replaced
         # and the new service ends up fighting the old one for port 9100. Stop
         # here instead: an install that refuses is recoverable, one that lands
         # on top of a running service is not.
-        Write-FAIL "A previous XP Thermal Service is still running"
-        Write-Dot "Something is still holding port $ServicePortStart and will not close."
+        Write-FAIL "A previous XP Thermal Service is still running and will not stop"
+        foreach ($line in $script:StopFailure.Detail) { Write-Dot $line }
+        Write-Dot "That process holds the port and the instance lock, so a new copy"
+        Write-Dot "would refuse to start even if this install finished."
         Write-Dot "Reboot this machine and run the installer again."
         Write-Log "Aborting: could not stop the previous installation" "ERROR"
-        Write-FailBox "Could not stop the running service. Reboot and re-run."
+        Write-FailBox "A previous service process will not stop. Reboot and re-run."
         return $false
     }
 
