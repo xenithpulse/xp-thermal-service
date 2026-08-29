@@ -45,6 +45,14 @@ $LegacyServiceNames = @(
 $WatchdogTaskName = "XPThermalServiceWatchdog"
 $HeartbeatTaskName = "XPThermalServiceHeartbeat"
 
+# Set while the install has the watchdog scheduled tasks disabled, so the
+# installer can put them back if it bails out before Step 8 re-registers them.
+$script:WatchdogSuspended = $false
+
+# Byte offsets into the daemon's own logs, taken before this install's first
+# start attempt so Get-DaemonFailureReason reads only what THIS run produced.
+$script:DaemonLogMark = $null
+
 # ============================================================
 # UI HELPERS
 # ============================================================
@@ -499,156 +507,446 @@ function Get-ServiceHealthPort {
     return $null
 }
 
-function Stop-AllServiceProcesses {
-    Write-Log "Stopping all service-related processes..."
-    
-    # Stop via sc.exe first
-    sc.exe stop $ServiceName 2>$null | Out-Null
-    
-    # Also try legacy names
-    foreach ($legacySvc in $LegacyServiceNames) {
-        sc.exe stop $legacySvc 2>$null | Out-Null
-    }
-    
-    Start-Sleep -Seconds 2
-    
-    # Kill daemon exe processes by image name (works even for SYSTEM processes
-    # where Get-Process.Path is empty)
-    foreach ($exeName in @("xpthermalprintservice.exe", "xpthermalservice.exe")) {
-        taskkill /F /IM $exeName 2>$null | Out-Null
-    }
-    
-    # Kill daemon exe processes by path match (fallback)
-    Get-Process | Where-Object { 
-        $_.Path -like "*$InstallPath*" -or 
-        $_.Path -like "*xpthermalprintservice*" -or
-        $_.Path -like "*xpthermalservice*"
-    } | ForEach-Object {
-        Write-Log "Terminating process: $($_.Name) (PID: $($_.Id))"
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
-    
-    # Kill any node.exe processes whose parent is a daemon wrapper
-    # (handles SYSTEM processes where Path is empty)
-    $daemonPids = @()
-    Get-CimInstance Win32_Process -Filter "Name='xpthermalprintservice.exe' OR Name='xpthermalservice.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-        $daemonPids += $_.ProcessId
-    }
-    if ($daemonPids.Count -gt 0) {
-        Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
-            $_.ParentProcessId -in $daemonPids
-        } | ForEach-Object {
-            Write-Log "Terminating daemon child node.exe (PID: $($_.ProcessId))"
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-    }
-    
-    # Kill any node processes running from install path
-    Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object { 
-        $_.Path -like "*$InstallPath*"
-    } | ForEach-Object {
-        Write-Log "Terminating node process (PID: $($_.Id))"
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    }
+# ============================================================
+# STOPPING WHAT IS ACTUALLY RUNNING
+# ============================================================
 
-    # Kill any process listening on the thermal service port range (9100-9110)
-    # This catches orphaned SYSTEM node.exe processes from previous installs
-    $PortRangeStart = 9100
-    $PortRangeEnd = 9110
+<#
+    THE SERVICE IS THREE PROCESSES DEEP, NOT ONE.
+
+        xpthermalprintservice.exe    winsw - this is the Windows service
+          |- node.exe                node-windows lib/wrapper.js
+              |- node.exe            index.js  <- owns port 9100 and service.lock
+
+    Only the leaf matters for a reinstall, and it is the one every previous
+    version of this cleanup missed:
+
+      * "taskkill /F /IM xpthermalprintservice.exe" kills the TOP of the tree
+        and orphans both node processes. They keep the port and keep
+        heartbeating the instance lock.
+      * The block below it that was meant to catch the children collected
+        their PIDs AFTER that taskkill had already run, so the list was always
+        empty and the block never executed once.
+      * Matching node.exe on Get-Process.Path never matched anything either -
+        the binary is C:\Program Files\nodejs\node.exe. Only the COMMAND LINE
+        mentions the install path.
+
+    Measured, from a real daemon err.log on the dev box:
+
+        Failed to start service: listen EADDRINUSE 127.0.0.1:9100
+        FATAL: Another XP Thermal Service is already running (process 2700 ...)
+
+    That pair IS the installer hanging on "Step 9 - Starting service". The new
+    service starts, finds the old one still holding the port and the lock,
+    exits; the wrapper respawns it and it does the same thing again, forever.
+#>
+
+# Who is listening on the service port range?
+#
+# Get-NetTCPConnection is the better answer but it rides the same MI/WMI stack
+# that is damaged on some tills, and it was previously wrapped in
+# SilentlyContinue - so a broken stack returned NOTHING rather than throwing,
+# and the netstat fallback in the catch block never ran. The fallback is now
+# checked on an empty result too, which is the case that actually happens.
+function Get-PortHolderPids {
+    $found = New-Object System.Collections.Generic.List[int]
+
     try {
-        $tcpConns = Get-NetTCPConnection -LocalPort ($PortRangeStart..$PortRangeEnd) -State Listen -ErrorAction SilentlyContinue
-        foreach ($conn in $tcpConns) {
-            $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-            if ($proc -and $proc.Name -eq "node") {
-                Write-Log "Killing orphaned node.exe on port $($conn.LocalPort) (PID: $($conn.OwningProcess))"
-                taskkill /F /PID $conn.OwningProcess 2>$null | Out-Null
-            }
+        $conns = Get-NetTCPConnection -LocalPort ($ServicePortStart..$ServicePortEnd) -State Listen -ErrorAction Stop
+        foreach ($c in $conns) {
+            $owner = [int]$c.OwningProcess
+            if ($owner -gt 0 -and -not $found.Contains($owner)) { $found.Add($owner) }
         }
-    } catch {
-        # Fallback: parse netstat for port-based cleanup
-        netstat -ano | Select-String ":910[0-9]\s.*LISTENING" | ForEach-Object {
-            if ($_ -match '\s+(\d+)\s*$') {
-                $procId = $matches[1]
-                $pname = (Get-Process -Id $procId -ErrorAction SilentlyContinue).Name
-                if ($pname -eq "node") {
-                    Write-Log "Killing orphaned node.exe (PID: $procId) via netstat fallback"
-                    taskkill /F /PID $procId 2>$null | Out-Null
+    }
+    catch { }
+
+    if ($found.Count -eq 0) {
+        # netstat has no dependency on WMI at all.
+        try {
+            netstat -ano -p TCP 2>$null | Select-String 'LISTENING' | ForEach-Object {
+                if ("$_" -match ':(\d+)\s+\S+\s+LISTENING\s+(\d+)') {
+                    $port = [int]$Matches[1]
+                    $procId = [int]$Matches[2]
+                    if ($port -ge $ServicePortStart -and $port -le $ServicePortEnd -and -not $found.Contains($procId)) {
+                        $found.Add($procId)
+                    }
                 }
             }
         }
+        catch { }
     }
-    
-    Start-Sleep -Seconds 3
+
+    # Never hand back System (4) or the idle process: some listeners are owned
+    # by the kernel and killing one must not be a typo away.
+    return @($found | Where-Object { $_ -gt 4 })
+}
+
+# Every descendant of the given PIDs, breadth-first.
+function Get-DescendantPids {
+    param([int[]]$RootPids)
+
+    if (-not $RootPids -or $RootPids.Count -eq 0) { return @() }
+
+    $table = $null
+    try { $table = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId) }
+    catch {
+        # No process table (damaged WMI). taskkill /T is the backstop, so hand
+        # back the roots rather than failing the install here.
+        return @($RootPids)
+    }
+
+    $seen  = New-Object System.Collections.Generic.List[int]
+    $queue = New-Object System.Collections.Generic.Queue[int]
+    foreach ($p in $RootPids) {
+        if (-not $seen.Contains([int]$p)) { $seen.Add([int]$p); $queue.Enqueue([int]$p) }
+    }
+
+    while ($queue.Count -gt 0) {
+        $parent = $queue.Dequeue()
+        foreach ($child in ($table | Where-Object { [int]$_.ParentProcessId -eq $parent })) {
+            $procId = [int]$child.ProcessId
+            if ($procId -gt 4 -and -not $seen.Contains($procId)) {
+                $seen.Add($procId)
+                $queue.Enqueue($procId)
+            }
+        }
+    }
+    return $seen.ToArray()
+}
+
+# This process and everything that launched it.
+#
+# The dashboard can launch the installer, which would make the installer a
+# descendant of the service it is about to tree-kill. "taskkill /F /T" on that
+# tree would take the installer down with it, mid-write, over a half-copied
+# install. Cheap to rule out, and impossible to recover from if we do not.
+function Get-SelfAncestorPids {
+    $chain = New-Object System.Collections.Generic.List[int]
+    $current = $PID
+    $guard = 0
+
+    while ($current -gt 4 -and $guard -lt 32) {
+        if ($chain.Contains($current)) { break }
+        $chain.Add($current)
+        $guard++
+        try {
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction Stop
+            if (-not $proc) { break }
+            $current = [int]$proc.ParentProcessId
+        }
+        catch { break }
+    }
+    return $chain.ToArray()
+}
+
+# Every PID belonging to this service, however it is running.
+function Get-ServicePids {
+    $pids = New-Object System.Collections.Generic.List[int]
+    $installLeaf = Split-Path $InstallPath -Leaf
+    $self = @(Get-SelfAncestorPids)
+
+    # 1. The winsw daemons, and everything underneath them.
+    $roots = @()
+    try {
+        $roots = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object { $_.Name -eq 'xpthermalprintservice.exe' -or $_.Name -eq 'xpthermalservice.exe' } |
+            ForEach-Object { [int]$_.ProcessId })
+    }
+    catch {
+        $roots = @(Get-Process -Name 'xpthermalprintservice', 'xpthermalservice' -ErrorAction SilentlyContinue |
+            ForEach-Object { [int]$_.Id })
+    }
+    foreach ($p in (Get-DescendantPids -RootPids $roots)) {
+        if (-not $pids.Contains([int]$p)) { $pids.Add([int]$p) }
+    }
+
+    # 2. node.exe running OUR script - matched on the command line, which is
+    #    the only place the install path appears.
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and ($_.CommandLine -like "*$installLeaf*") } |
+            ForEach-Object {
+                $procId = [int]$_.ProcessId
+                if (-not $pids.Contains($procId)) { $pids.Add($procId) }
+            }
+    }
+    catch { }
+
+    # 3. Whoever is actually listening on the port range - the definitive
+    #    answer, and the one that catches an orphan whose parentage can no
+    #    longer be reconstructed. Restricted to our own executables: another
+    #    program legitimately using 9100 is a port clash to route around at
+    #    Step 5, not a process to kill.
+    foreach ($p in (Get-PortHolderPids)) {
+        if ($pids.Contains([int]$p)) { continue }
+        $proc = Get-Process -Id $p -ErrorAction SilentlyContinue
+        if ($proc -and $proc.Name -match '^(node|xpthermalprintservice|xpthermalservice)$') {
+            $pids.Add([int]$p)
+        }
+    }
+
+    return @($pids | Where-Object { $self -notcontains $_ })
+}
+
+# sc.exe stop returns as soon as the SCM accepts the request, not when the
+# service is down.
+function Wait-ServiceStopped {
+    param([string]$Name, [int]$TimeoutSec = 30)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -eq 'Stopped') { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+<#
+    THE WATCHDOG HAS TO BE TOLD TO STAND DOWN DURING AN INSTALL.
+
+    Layer A runs every two minutes as SYSTEM and its entire job is "if the
+    service is not running, start it". An install stops the service for several
+    minutes - the node_modules robocopy alone is over a minute on a till - so
+    the OLD watchdog, belonging to the OLD install, spends that whole window
+    faithfully restarting the OLD service on top of the one being deployed.
+
+    That is where "the service is still listed in Task Manager" comes from, and
+    it is the other half of the EADDRINUSE at Step 9. Nothing suspended these
+    tasks before: Install-Watchdog re-registers them at Step 8, which is six
+    steps too late to help.
+#>
+function Suspend-Watchdog {
+    foreach ($task in @($WatchdogTaskName, $HeartbeatTaskName)) {
+        try { Disable-ScheduledTask -TaskName $task -ErrorAction Stop | Out-Null }
+        catch { schtasks /Change /TN $task /DISABLE 2>$null | Out-Null }
+        # Disabling does not stop an instance that is already mid-run.
+        schtasks /End /TN $task 2>$null | Out-Null
+    }
+    $script:WatchdogSuspended = $true
+    Write-Log "Watchdog and heartbeat tasks suspended for the duration of the install"
+}
+
+# Step 8 re-registers both tasks with -Force, which re-enables them, so this
+# only matters when the install bails out before then. A box left with no
+# watchdog because an install failed is strictly worse than the state it
+# started in.
+function Resume-Watchdog {
+    if (-not $script:WatchdogSuspended) { return }
+    foreach ($task in @($WatchdogTaskName, $HeartbeatTaskName)) {
+        try { Enable-ScheduledTask -TaskName $task -ErrorAction Stop | Out-Null }
+        catch { schtasks /Change /TN $task /ENABLE 2>$null | Out-Null }
+    }
+    $script:WatchdogSuspended = $false
+    Write-Log "Watchdog and heartbeat tasks re-enabled"
+}
+
+# The instance lock lives in data\, which an update deliberately preserves - so
+# a lock written by a process we just force-killed survives into the new
+# install carrying a heartbeat only seconds old. The new service then waits 20s
+# for a handover that is never coming and exits with "Another XP Thermal
+# Service is already running".
+#
+# Only call this once Stop-AllServiceProcesses has confirmed nothing of ours is
+# left running: at that point the lock cannot have a live owner by definition.
+function Clear-InstanceLock {
+    $lockPath = "$InstallPath\data\service.lock"
+    if (-not (Test-Path $lockPath)) { return }
+
+    $owner = ""
+    try {
+        $lock = Get-Content $lockPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($lock.pid) { $owner = " (was held by process $($lock.pid))" }
+    }
+    catch { }
+
+    Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+    Write-Log "Cleared the instance lock$owner"
+}
+
+function Stop-AllServiceProcesses {
+    Write-Log "Stopping all service-related processes..."
+
+    # Ask politely first, and WAIT. A graceful stop lets the service drain
+    # in-flight receipts and release its own instance lock, which is the whole
+    # difference between an update and a corrupted one. Nothing here waited
+    # before: sc.exe stop was fired and the force-kill followed two seconds
+    # later regardless.
+    $toStop = New-Object System.Collections.Generic.List[string]
+    foreach ($name in (@($ServiceName) + $LegacyServiceNames)) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($svc -and -not $toStop.Contains($svc.Name)) { $toStop.Add($svc.Name) }
+    }
+    # An install that fell back to sc.exe create may have registered under a
+    # different key. The display name is the one thing that stays put.
+    $byDisplay = Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue
+    if ($byDisplay -and -not $toStop.Contains($byDisplay.Name)) { $toStop.Add($byDisplay.Name) }
+
+    foreach ($name in $toStop) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -eq 'Stopped') { continue }
+        Write-Log "Stopping service $name (status $($svc.Status))..."
+        sc.exe stop $name 2>$null | Out-Null
+        if (-not (Wait-ServiceStopped -Name $name -TimeoutSec 30)) {
+            Write-Log "Service $name did not stop within 30s - forcing" "WARNING"
+        }
+    }
+
+    # Kill the TREE, not the root. /T takes the orphaned node children with it,
+    # which "taskkill /F /IM" never did.
+    foreach ($procId in (Get-ServicePids)) {
+        Write-Log "Terminating service process tree at PID $procId"
+        taskkill /F /T /PID $procId 2>$null | Out-Null
+    }
+
+    # Image-name sweep for anything the tree walk could not see (damaged WMI).
+    foreach ($exeName in @("xpthermalprintservice.exe", "xpthermalservice.exe")) {
+        taskkill /F /IM $exeName 2>$null | Out-Null
+    }
+
+    Start-Sleep -Seconds 2
+
+    # VERIFY, and say so.
+    #
+    # Everything downstream - the file copy, the service registration, the
+    # start at Step 9 - assumed this worked, and until now nothing checked. A
+    # single surviving node.exe holding port 9100 is the entire "installer
+    # stops at Step 9" failure, and it was reported as "Stopped service
+    # processes" with a tick next to it.
+    $deadline = (Get-Date).AddSeconds(30)
+    $remaining = @(Get-ServicePids)
+    while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        foreach ($procId in $remaining) { taskkill /F /T /PID $procId 2>$null | Out-Null }
+        Start-Sleep -Seconds 2
+        $remaining = @(Get-ServicePids)
+    }
+
+    if ($remaining.Count -gt 0) {
+        foreach ($procId in $remaining) {
+            $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            $desc = if ($p) { "$($p.Name) (PID $procId)" } else { "PID $procId" }
+            Write-Log "Could not terminate $desc" "ERROR"
+        }
+        return $false
+    }
+
+    Write-Log "All service processes terminated; ports $ServicePortStart-$ServicePortEnd released"
+    return $true
 }
 
 function Remove-AllServices {
     Write-Log "Removing all service registrations..."
-    
-    # Remove main service
-    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($svc) {
-        sc.exe delete $ServiceName 2>$null | Out-Null
-        Write-Log "Removed service: $ServiceName"
-    }
-    
-    # Remove by display name
-    $svcByDisplay = Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue
-    if ($svcByDisplay) {
-        sc.exe delete $svcByDisplay.Name 2>$null | Out-Null
-        Write-Log "Removed service: $($svcByDisplay.Name)"
-    }
-    
-    # Remove legacy services
-    foreach ($legacySvc in $LegacyServiceNames) {
-        $old = Get-Service -Name $legacySvc -ErrorAction SilentlyContinue
-        if ($old) {
-            sc.exe delete $legacySvc 2>$null | Out-Null
-            Write-Log "Removed legacy service: $legacySvc"
+
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($name in (@($ServiceName) + $LegacyServiceNames)) {
+        if ((Get-Service -Name $name -ErrorAction SilentlyContinue) -and -not $names.Contains($name)) {
+            $names.Add($name)
         }
     }
-    
-    Start-Sleep -Seconds 2
+    $byDisplay = Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue
+    if ($byDisplay -and -not $names.Contains($byDisplay.Name)) { $names.Add($byDisplay.Name) }
+
+    if ($names.Count -eq 0) {
+        Write-Log "No service registrations present"
+        return $true
+    }
+
+    foreach ($name in $names) {
+        sc.exe delete $name 2>$null | Out-Null
+        Write-Log "Requested deletion of service: $name"
+    }
+
+    <#
+        "sc delete" only MARKS a service for deletion. The registration lives on
+        until the last open handle to it closes, and a service in that state
+        still answers Get-Service - so Step 6 concluded it was registered, and
+        every attempt to re-create or start it failed with error 1072
+        (ERROR_SERVICE_MARKED_FOR_DELETE). From the outside that is a Step 9
+        that never finishes.
+
+        Handles are held by services.msc, Task Manager's Services tab, and
+        Event Viewer. Waiting is worth it because they are usually transient;
+        when they are not, saying so beats registering on top of a corpse.
+    #>
+    $stubborn = @()
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        $stubborn = @($names | Where-Object { Get-Service -Name $_ -ErrorAction SilentlyContinue })
+        if ($stubborn.Count -eq 0) { break }
+        Start-Sleep -Seconds 1
+    }
+
+    if ($stubborn.Count -gt 0) {
+        foreach ($name in $stubborn) {
+            Write-Log "Service '$name' is still registered 30s after deletion - marked for deletion, something holds a handle to it" "ERROR"
+        }
+        return $false
+    }
+
+    Write-Log "All service registrations removed"
+    return $true
 }
 
 function Remove-DaemonFolder {
     $daemonPath = "$InstallPath\daemon"
-    if (Test-Path $daemonPath) {
-        Write-Log "Removing daemon folder..."
-        
-        # Force-kill daemon exe processes by image name (handles SYSTEM processes)
-        foreach ($exeName in @("xpthermalprintservice.exe", "xpthermalservice.exe")) {
-            taskkill /F /IM $exeName 2>$null | Out-Null
+    if (-not (Test-Path $daemonPath)) { return $true }
+
+    Write-Log "Removing daemon folder..."
+
+    # Anything still alive in here was missed by Stop-AllServiceProcesses.
+    Get-ChildItem $daemonPath -Filter "*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+        $exePath = $_.FullName
+        Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath } | ForEach-Object {
+            taskkill /F /T /PID $_.Id 2>$null | Out-Null
         }
-        
-        # Also kill by path match
-        Get-ChildItem $daemonPath -Filter "*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
-            $exePath = $_.FullName
-            Get-Process | Where-Object { $_.Path -eq $exePath } | ForEach-Object {
-                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-            }
+    }
+
+    $retries = 5
+    while ($retries -gt 0 -and (Test-Path $daemonPath)) {
+        try {
+            Remove-Item $daemonPath -Recurse -Force -ErrorAction Stop
+            Write-Log "Daemon folder removed successfully"
+            return $true
         }
-        
-        Start-Sleep -Seconds 2
-        
-        # Remove with retries
-        $retries = 5
-        while ($retries -gt 0 -and (Test-Path $daemonPath)) {
-            try {
-                Remove-Item $daemonPath -Recurse -Force -ErrorAction Stop
-                Write-Log "Daemon folder removed successfully"
-                break
-            }
-            catch {
-                $retries--
-                if ($retries -gt 0) {
-                    Start-Sleep -Seconds 2
-                }
-            }
+        catch {
+            $retries--
+            if ($retries -gt 0) { Start-Sleep -Seconds 2 }
         }
-        
-        if (Test-Path $daemonPath) {
-            Write-Warn "Could not fully remove daemon folder - will be cleaned on reboot"
-        }
+    }
+
+    <#
+        MOVE IT ASIDE RATHER THAN GIVING UP.
+
+        The old branch logged "will be cleaned on reboot" and carried on into a
+        directory it had just failed to empty. That is how a dev box ended up
+        still holding xpthermalservice.exe and its descriptor from 19-Mar-26
+        after months of reinstalls: node-windows wrote the new daemon alongside
+        the old one, and the sc.exe fallback at Step 6 then registered whichever
+        descriptor it found.
+
+        A rename succeeds where a delete fails, because Windows only blocks
+        deleting a file with an open handle - not renaming its parent. The new
+        install therefore always gets a clean, empty daemon directory.
+    #>
+    $parked = "$InstallPath\daemon.old-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    try {
+        Move-Item $daemonPath $parked -Force -ErrorAction Stop
+        Write-Log "Daemon folder was locked - moved aside to $parked" "WARNING"
+        # Best effort; if it is still locked it goes on the reboot queue below.
+        Remove-Item $parked -Recurse -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+    catch {
+        Write-Log "Could not remove or rename the daemon folder: $_" "ERROR"
+        return $false
+    }
+}
+
+# Sweep up daemon directories parked by a previous run that could not delete
+# them at the time. By now nothing holds them.
+function Remove-ParkedDaemonFolders {
+    Get-ChildItem $InstallPath -Directory -Filter "daemon.old-*" -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1591,10 +1889,178 @@ function Remove-Watchdog {
 }
 
 # ============================================================
+# UPDATE DETECTION AND FAILURE DIAGNOSIS
+# ============================================================
+
+# What is already on this machine?
+#
+# An install over an existing one is an UPDATE, and it has to say so: the
+# operator needs to know their printers and job history are being kept, and the
+# installer needs to know it is replacing something rather than landing on a
+# clean box.
+function Get-ExistingInstall {
+    $info = [ordered]@{ Present = $false; Version = $null; ServiceStatus = $null; Description = "" }
+
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $svc) { $svc = Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue }
+    $hasFiles = Test-Path "$InstallPath\index.js"
+
+    if (-not $svc -and -not $hasFiles) { return $info }
+
+    $info.Present = $true
+    if ($svc) { $info.ServiceStatus = $svc.Status.ToString() }
+
+    $stamp = "$InstallPath\installed-version.json"
+    if (Test-Path $stamp) {
+        try { $info.Version = (Get-Content $stamp -Raw -ErrorAction Stop | ConvertFrom-Json).version } catch { }
+    }
+    if (-not $info.Version -and (Test-Path "$InstallPath\package.json")) {
+        try { $info.Version = (Get-Content "$InstallPath\package.json" -Raw -ErrorAction Stop | ConvertFrom-Json).version } catch { }
+    }
+
+    $parts = @()
+    if ($info.Version) { $parts += "v$($info.Version)" } else { $parts += "an earlier build" }
+    if ($info.ServiceStatus) { $parts += "service $($info.ServiceStatus.ToLower())" }
+    $info.Description = $parts -join ", "
+
+    return $info
+}
+
+function Get-SourceVersion {
+    param([string]$SourceDir)
+    if (-not $SourceDir) { return $null }
+    $pkg = Join-Path $SourceDir "package.json"
+    if (-not (Test-Path $pkg)) { return $null }
+    try { return (Get-Content $pkg -Raw -ErrorAction Stop | ConvertFrom-Json).version } catch { return $null }
+}
+
+# Stamped at the end of a successful install so the NEXT one can name what it
+# is replacing. package.json alone is not enough: it is copied at Step 4, so by
+# the time an install fails it already reports the new version.
+function Set-InstalledVersion {
+    param([string]$Version)
+    if (-not $Version) { return }
+    try {
+        [ordered]@{ version = $Version; installedAt = (Get-Date).ToString('o') } |
+            ConvertTo-Json | Set-Content "$InstallPath\installed-version.json" -Encoding UTF8 -ErrorAction Stop
+    }
+    catch { }
+}
+
+# ---- Reading the reason out of the daemon's own log ---------------------
+#
+# "Step 9 failed" is not a diagnosis, and the reason has always been sitting in
+# daemon\xpthermalprintservice.err.log where nobody looks. Mark the file length
+# before this install's first start attempt and read only what follows, so an
+# error from five months ago cannot be reported as today's cause.
+
+function Get-DaemonLogStem {
+    return "$InstallPath\daemon\$([System.IO.Path]::GetFileNameWithoutExtension($ServiceName))"
+}
+
+function Set-DaemonLogMark {
+    $mark = @{}
+    foreach ($suffix in @('err', 'out')) {
+        $log = "$(Get-DaemonLogStem).$suffix.log"
+        $mark[$suffix] = if (Test-Path $log) { (Get-Item $log).Length } else { [long]0 }
+    }
+    $script:DaemonLogMark = $mark
+}
+
+# Read from a byte offset with FileShare::ReadWrite - winsw holds these files
+# open while the service runs, so Get-Content would fail outright.
+function Read-TextFromOffset {
+    param([string]$Path, [long]$Offset)
+
+    if (-not (Test-Path $Path)) { return "" }
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            if ($Offset -eq $fs.Length) {
+                # Nothing has been written since the mark. This is the common
+                # case and it MUST return empty: reading the file from the top
+                # here is how a five-month-old EADDRINUSE gets reported as the
+                # reason today's install failed.
+                return ""
+            }
+            if ($Offset -gt 0 -and $Offset -lt $fs.Length) {
+                $fs.Position = $Offset
+            }
+            # $Offset greater than the length means winsw rotated the log, so
+            # the whole of what is there now is new: read from the start.
+            $sr = New-Object System.IO.StreamReader($fs)
+            return $sr.ReadToEnd()
+        }
+        finally { $fs.Dispose() }
+    }
+    catch { return "" }
+}
+
+function Get-DaemonFailureReason {
+    $offset = [long]0
+    if ($script:DaemonLogMark -and $script:DaemonLogMark['err']) { $offset = [long]$script:DaemonLogMark['err'] }
+    $text = Read-TextFromOffset -Path "$(Get-DaemonLogStem).err.log" -Offset $offset
+    if (-not $text -or -not $text.Trim()) { return $null }
+
+    # These two account for essentially every "stuck on Step 9" report, and
+    # both are caused by a previous install that was not fully removed.
+    if ($text -match 'EADDRINUSE[\s\S]{0,400}?port:\s*(\d+)' -or $text -match 'EADDRINUSE[^\r\n]*?:(\d{4})') {
+        $port = $Matches[1]
+        $holders = @(Get-PortHolderPids)
+        $who = ""
+        if ($holders.Count -gt 0) {
+            $names = $holders | ForEach-Object {
+                $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
+                if ($p) { "$($p.Name) (PID $_)" } else { "PID $_" }
+            }
+            $who = " Still held by $($names -join ', ')."
+        }
+        return @{
+            Summary = "Port $port is already in use.$who"
+            Hints   = @(
+                "Another copy of this service never exited. Reboot this machine and",
+                "run the installer again - it now stops the whole process tree first."
+            )
+        }
+    }
+
+    if ($text -match 'Another XP Thermal Service is already running \(process (\d+)') {
+        return @{
+            Summary = "A previous instance (PID $($Matches[1])) still owns the instance lock."
+            Hints   = @(
+                "Delete $InstallPath\data\service.lock and run the installer again,",
+                "or reboot. The lock also expires on its own after 90 seconds."
+            )
+        }
+    }
+
+    # Anything else: hand back the last real line rather than guessing at it.
+    $lastLine = ($text -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    if ($lastLine) {
+        return @{ Summary = $lastLine.Trim(); Hints = @("Full output: $(Get-DaemonLogStem).err.log") }
+    }
+    return $null
+}
+
+# ============================================================
 # SERVICE INSTALLATION
 # ============================================================
 
+# The install disables the watchdog scheduled tasks at Step 2 and relies on
+# Step 8 to re-register them. Every early return in between - a failed
+# pre-flight, a service that will not stop, a service that will not start -
+# would otherwise leave the machine with no watchdog at all, which is a worse
+# place than it started from.
 function Install-Service {
+    try {
+        return Invoke-ServiceInstall
+    }
+    finally {
+        Resume-Watchdog
+    }
+}
+
+function Invoke-ServiceInstall {
     Write-Banner
     
     # â”€â”€ Step 1: Pre-flight â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1608,19 +2074,62 @@ function Install-Service {
     Write-StepComplete
     
     # â”€â”€ Step 2: Cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    Write-StepHeader "Cleaning previous installation" 2
-    
-    Stop-AllServiceProcesses
-    Write-Dot "Stopped service processes"
-    
-    Remove-AllServices
-    Write-Dot "Removed service registrations"
-    
-    Remove-DaemonFolder
+    $existing = Get-ExistingInstall
+    $newVersion = Get-SourceVersion -SourceDir (Split-Path -Parent $PSScriptRoot)
+
+    if ($existing.Present) {
+        Write-StepHeader "Updating existing installation" 2
+        $to = if ($newVersion) { " to v$newVersion" } else { "" }
+        Write-Dot "Found $($existing.Description) - updating$to"
+        Write-Dot "Config, printers and job history are kept"
+        Write-Log "Existing installation detected ($($existing.Description)); updating$to"
+    }
+    else {
+        Write-StepHeader "Cleaning previous installation" 2
+    }
+
+    # FIRST, before anything else touches the service.
+    #
+    # The watchdog restarts the service we are about to replace, on a two-minute
+    # timer, for the entire length of the install. See Suspend-Watchdog.
+    Suspend-Watchdog
+    Write-Dot "Watchdog paused for the duration"
+
+    if (Stop-AllServiceProcesses) {
+        Write-Dot "Stopped service processes"
+    }
+    else {
+        # Deploying over a live install is how the old files get half-replaced
+        # and the new service ends up fighting the old one for port 9100. Stop
+        # here instead: an install that refuses is recoverable, one that lands
+        # on top of a running service is not.
+        Write-FAIL "A previous XP Thermal Service is still running"
+        Write-Dot "Something is still holding port $ServicePortStart and will not close."
+        Write-Dot "Reboot this machine and run the installer again."
+        Write-Log "Aborting: could not stop the previous installation" "ERROR"
+        Write-FailBox "Could not stop the running service. Reboot and re-run."
+        return $false
+    }
+
+    if (Remove-AllServices) {
+        Write-Dot "Removed service registrations"
+    }
+    else {
+        Write-WARN "Windows still has the old service marked for deletion"
+        Write-Dot "Close services.msc and Task Manager's Services tab, then re-run -"
+        Write-Dot "registration will fail with error 1072 until that handle is gone."
+    }
+
+    # Safe now: nothing of ours is running, so the lock cannot have a live owner.
+    Clear-InstanceLock
+    Write-Dot "Instance lock cleared"
+
+    $null = Remove-DaemonFolder
+    Remove-ParkedDaemonFolders
     Write-Dot "Cleaned daemon folder"
-    
+
     Start-Sleep -Seconds 2
-    
+
     Write-StepComplete
     
     # â”€â”€ Step 3: Prepare directories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1646,10 +2155,43 @@ function Install-Service {
     
     $sourceDir = Split-Path -Parent $PSScriptRoot
     
+    <#
+        NOT "dist\*" wholesale - the daemon folder must never be copied.
+
+        node-windows writes the daemon next to the script it wraps, so any dev
+        box that has ever run the service from source grows a dist\daemon
+        folder: winsw, its descriptor, and its logs. Copying that in RESTORES
+        the daemon folder Step 2 has just deleted, which is why it never looked
+        cleaned no matter what Step 2 did.
+
+        Measured in this repo, 2026-08-29. dist\daemon held a descriptor dated
+        19-Mar pointing at
+
+            E:\xp-thermal-service\dist\index.js     --maxrestarts 3
+
+        - a path that exists on one developer's machine and on no till
+        anywhere. Step 6's fallback registers whatever descriptor is already on
+        disk, so on a client box that is a service whose wrapper spawns node
+        against a file that is not there, gives up after three tries, and never
+        answers the health check. It presents as an installer that stops at
+        Step 9, on a machine that has never had the service installed.
+
+        The daemon belongs to the target machine and is generated there.
+    #>
     Invoke-WithRetry -Operation "Copy dist files" -ScriptBlock {
-        Copy-Item "$sourceDir\dist\*" "$InstallPath\" -Recurse -Force -ErrorAction Stop
+        Get-ChildItem "$sourceDir\dist" -Force -ErrorAction Stop |
+            Where-Object { $_.Name -ne 'daemon' } |
+            ForEach-Object { Copy-Item $_.FullName "$InstallPath\" -Recurse -Force -ErrorAction Stop }
     }
     Write-Dot "Application code copied"
+
+    # Belt and braces: nothing else should be able to put a daemon folder here
+    # between Step 2 and Step 6, but a stale one is expensive enough to assert
+    # rather than assume.
+    if (Test-Path "$InstallPath\daemon") {
+        Write-Log "A daemon folder reappeared after the file copy - removing it again" "WARNING"
+        $null = Remove-DaemonFolder
+    }
     
     Copy-Item "$sourceDir\package.json" "$InstallPath\" -Force -ErrorAction SilentlyContinue
     
@@ -1720,7 +2262,10 @@ function Install-Service {
     
     # â”€â”€ Step 6: Register Windows service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Write-StepHeader "Registering Windows service" 6
-    
+
+    # Everything the daemon logs from here belongs to THIS install.
+    Set-DaemonLogMark
+
     Push-Location $InstallPath
     try {
         if (-not (Test-Path "node_modules\node-windows")) {
@@ -1813,21 +2358,27 @@ svc.install();
             svc.install() is ASYNCHRONOUS, so give the SCM a moment to make the
             service enumerable before Get-Service below decides it is absent.
 
-            MEASURED, 2026-08-16, and worth writing down because it changes what
-            "successful" means here: on this box node-windows emits its 'install'
-            event - so the check above prints "registration successful" - and the
-            service STILL never appears in the SCM. Polling for twenty seconds
-            changed nothing; the sc.exe/winsw fallback below is what actually
-            registers it, on every run.
+            THIS BLOCK USED TO SAY the fallback was the normal path - that
+            node-windows emitted its 'install' event and the service never
+            appeared in the SCM, on every run, measured 2026-08-16. That was
+            true, and the cause was not node-windows.
 
-            So the fallback is the NORMAL path here, not the exceptional one, and
-            the pair of log lines ("registration successful" followed by
-            "node-windows did not register service") are both accurate and
-            together unreadable. Left short deliberately: a longer wait is twenty
-            seconds added to every install for an outcome that does not arrive.
+            Step 4 was copying dist\daemon into the install directory, putting a
+            populated daemon folder with a foreign descriptor back where Step 2
+            had just removed one. node-windows found a daemon directory it had
+            not created, and registration went sideways. Step 4 now excludes it.
 
-            The end state is correct either way now that the descriptor is
-            regenerated properly - but do not read "node-windows registration
+            RE-MEASURED 2026-08-29, three consecutive reinstalls on the dev box:
+            node-windows registers natively every time, in about four seconds,
+            and neither the descriptor repair below nor the sc.exe fallback runs
+            at all. The six-second poll is comfortably enough.
+
+            The fallback stays because it has to - a till where node-windows
+            genuinely fails still needs a service. But it is the exceptional
+            path again, and if you find yourself in it, the first question is
+            what put a daemon folder on disk before Step 6.
+
+            Unchanged and still true: do not read "node-windows registration
             successful" as meaning the service exists. Only Get-Service does.
         #>
         $registerDeadline = (Get-Date).AddSeconds(6)
@@ -2046,60 +2597,99 @@ svc.install();
     
     # â”€â”€ Step 9: Verify service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Write-StepHeader "Starting service" 9
-    
+
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $svc) { $svc = Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue }
+
+    if (-not $svc) {
+        Write-FAIL "The service is not registered - there is nothing to start"
+        Write-Log "Step 9: no service registration found" "ERROR"
+        Write-StepComplete "Failed"
+        Write-FailBox "Windows service registration did not survive Step 6. See $LogFile."
+        return $false
+    }
+
+    <#
+        WHY THIS NO LONGER SPINS OUT THE CLOCK AND CARRIES ON.
+
+        The old loop attempted sc.exe start once, waited out 45 seconds, called
+        Write-StepComplete regardless of the outcome, and handed a dead service
+        to Step 10 - which then spent another 60 seconds discovering the same
+        thing. Nearly two minutes of progress bars, ending in "Service
+        installed but API is not responding", for a failure whose cause was
+        written in plain English in the daemon's err.log the entire time.
+
+        That is what "the installer stops at Step 9" looks like from the far
+        side. A service that exits three times running will not start on the
+        fourth, so: stop, read the log, and say what is actually wrong.
+    #>
     $maxWaitSecs = 45
     $waited = 0
     $serviceRunning = $false
-    $startAttempted = $false
-    
+    $startAttempts = 0
+
     while ($waited -lt $maxWaitSecs -and -not $serviceRunning) {
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if (-not $svc) {
-            $svc = Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue
+        try { $svc.Refresh() } catch { }
+
+        if ($svc.Status -eq 'Running') {
+            $serviceRunning = $true
+            Clear-Spinner
+            Write-OK "Service process running"
+            Write-Log "Service process is running"
         }
-        
-        if ($svc) {
-            if ($svc.Status -eq 'Running') {
-                $serviceRunning = $true
-                Clear-Spinner
-                Write-OK "Service process running"
-                Write-Log "Service process is running"
+        elseif ($svc.Status -eq 'Stopped') {
+            if ($startAttempts -ge 3) { break }
+
+            $startAttempts++
+            Clear-Spinner
+            Write-Log "Service stopped - start attempt $startAttempts via sc.exe..."
+            $scOut = (sc.exe start $svc.Name 2>&1 | Out-String)
+            if ($scOut -match 'FAILED\s+(\d+)') {
+                $scErr = $Matches[1]
+                Write-Log "sc start failed with error ${scErr}: $scOut" "ERROR"
+                if ($scErr -eq '1072') {
+                    # ERROR_SERVICE_MARKED_FOR_DELETE. Remove-AllServices warns
+                    # about this at Step 2; by here it is terminal.
+                    Write-FAIL "Windows still has the old service marked for deletion (error 1072)"
+                    Write-Dot "Only a reboot clears that. No amount of retrying will."
+                    Write-StepComplete "Failed"
+                    Write-FailBox "Reboot this machine, then run the installer again."
+                    return $false
+                }
             }
-            elseif ($svc.Status -eq 'Stopped' -and -not $startAttempted) {
-                $startAttempted = $true
-                Write-Log "Service stopped - starting via sc.exe..."
-                sc.exe start $svc.Name 2>&1 | Out-Null
-                Start-Sleep -Seconds 3
-                $waited += 3
-            }
-            else {
-                Write-Spinner "Waiting for service to start" $waited $maxWaitSecs
-                Start-Sleep -Seconds 2
-                $waited += 2
-            }
+            Start-Sleep -Seconds 3
+            $waited += 3
         }
         else {
-            Write-Spinner "Waiting for service registration" $waited $maxWaitSecs
+            Write-Spinner "Waiting for service to start" $waited $maxWaitSecs
             Start-Sleep -Seconds 2
             $waited += 2
         }
     }
-    
+    Clear-Spinner
+
     if (-not $serviceRunning) {
-        Clear-Spinner
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($svc) {
-            Write-Log "Final start attempt via sc.exe..."
-            sc.exe start $svc.Name 2>&1 | Out-Null
-            Start-Sleep -Seconds 5
-            $svc = Get-Service -Name $svc.Name
-            $serviceRunning = ($svc.Status -eq 'Running')
-            if ($serviceRunning) { Write-OK "Service started on retry" }
+        Write-FAIL "The service did not stay running"
+        Write-Log "Step 9: service never reached Running (after $startAttempts start attempts)" "ERROR"
+
+        $reason = Get-DaemonFailureReason
+        if ($reason) {
+            Write-Dot $reason.Summary
+            foreach ($hint in $reason.Hints) { Write-Dot $hint }
+            Write-Log "Daemon reported: $($reason.Summary)" "ERROR"
         }
+        else {
+            Write-Dot "The daemon logged nothing to $(Get-DaemonLogStem).err.log."
+            Write-Dot "Check the Windows event log (System) for service $($svc.Name)."
+        }
+
+        Write-StepComplete "Failed"
+        Write-FailBox "Service registered but would not start. Details in $LogFile."
+        return $false
     }
-    
+
     Write-StepComplete
-    
+
     # â”€â”€ Step 10: Health check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     Write-StepHeader "Verifying health endpoint" 10
     
@@ -2136,7 +2726,11 @@ svc.install();
     if ($healthPort) {
         Set-Content -Path "$InstallPath\active_port.txt" -Value $healthPort
         Write-OK "Health endpoint responding on port $healthPort"
-        
+
+        # Stamped only now, on a verified-working install. The next run reads
+        # this to tell the operator what it is replacing.
+        Set-InstalledVersion -Version $newVersion
+
         Write-Log "XP Thermal Service installed successfully on port $healthPort" "SUCCESS"
         
         # Read API key for display
@@ -2157,8 +2751,19 @@ svc.install();
     }
     else {
         Write-FAIL "Health endpoint did not respond within $maxHealthWait seconds"
-        Write-FailBox "Service installed but API is not responding."
-        
+
+        # The service is Running as far as Windows is concerned, so the wrapper
+        # is up and its child is the thing failing - which means the reason is
+        # in the daemon log, same as at Step 9.
+        $reason = Get-DaemonFailureReason
+        if ($reason) {
+            Write-Dot $reason.Summary
+            foreach ($hint in $reason.Hints) { Write-Dot $hint }
+            Write-Log "Daemon reported: $($reason.Summary)" "ERROR"
+        }
+
+        Write-FailBox "Service installed but the API is not responding."
+
         return $false
     }
 }
@@ -2189,9 +2794,16 @@ function Uninstall-Service {
     Remove-IconAndShortcuts
     if (-not $Silent) { Write-OK "Shortcuts and icon removed" }
     
-    # Stop all processes
-    Stop-AllServiceProcesses
-    if (-not $Silent) { Write-OK "Processes stopped" }
+    # Stop all processes. These return a status now, so discard it explicitly
+    # rather than letting a bare "True" print itself into the uninstall output.
+    if (Stop-AllServiceProcesses) {
+        if (-not $Silent) { Write-OK "Processes stopped" }
+    }
+    else {
+        if (-not $Silent) { Write-WARN "Some service processes could not be stopped - reboot to finish" }
+    }
+
+    Clear-InstanceLock
     
     # Uninstall via node-windows (if available)
     if (Test-Path "$InstallPath\node_modules\node-windows") {
@@ -2222,11 +2834,16 @@ setTimeout(() => process.exit(0), 5000);
     }
     
     # Force remove all services
-    Remove-AllServices
-    if (-not $Silent) { Write-OK "Service registrations removed" }
-    
+    if (Remove-AllServices) {
+        if (-not $Silent) { Write-OK "Service registrations removed" }
+    }
+    else {
+        if (-not $Silent) { Write-WARN "Windows has the service marked for deletion - it goes on reboot" }
+    }
+
     # Remove daemon folder
-    Remove-DaemonFolder
+    $null = Remove-DaemonFolder
+    Remove-ParkedDaemonFolders
     if (-not $Silent) { Write-OK "Daemon folder cleaned" }
     
     # Remove firewall rules
@@ -2322,9 +2939,11 @@ function Repair-Service {
     
     # Full uninstall (but keep files)
     $script:Silent = $true
-    Stop-AllServiceProcesses
-    Remove-AllServices
-    Remove-DaemonFolder
+    $null = Stop-AllServiceProcesses
+    $null = Remove-AllServices
+    Clear-InstanceLock
+    $null = Remove-DaemonFolder
+    Remove-ParkedDaemonFolders
     Remove-Watchdog
     $script:Silent = $false
     
