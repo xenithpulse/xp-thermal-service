@@ -2,7 +2,7 @@
 
 Audience: on-site IT installer and whoever supports the site afterwards. Covers the dashboard, routine tasks, and the operational rules that are not obvious.
 
-See [install.md](install.md) to deploy, [troubleshooting.md](troubleshooting.md) when something breaks.
+See [install.md](install.md) to deploy, [troubleshooting.md](troubleshooting.md) when something breaks, [web-integration.md](web-integration.md) to connect a web app.
 
 ---
 

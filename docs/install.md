@@ -2,7 +2,7 @@
 
 Audience: on-site IT installer. Assumes Administrator access, PowerShell, and familiarity with Windows Services.
 
-For API integration see the [API Reference](../README.md#api-reference). For day-to-day operation see [daily-use.md](daily-use.md). When something is broken see [troubleshooting.md](troubleshooting.md).
+For day-to-day operation see [daily-use.md](daily-use.md). When something is broken see [troubleshooting.md](troubleshooting.md). To connect a web app to the API see [web-integration.md](web-integration.md).
 
 ---
 
@@ -187,3 +187,11 @@ or `scripts\uninstall.bat` as Administrator. Removes the service, firewall rule,
 - [ ] Cash drawer verified via **Test drawer now**, if fitted
 - [ ] POS origin present in `security.allowedOrigins`
 - [ ] Survives a reboot — actually reboot and re-check `/health`
+
+---
+
+## Connecting a web application
+
+If the site also needs to drive the printers from its own web app, hand the integrator [web-integration.md](web-integration.md) — it covers port discovery, the API key, CORS clearance, and the print/job contract.
+
+Two things they will need from you at handover: the **API key** (dashboard → Settings) and their **origin added to `security.allowedOrigins`**.

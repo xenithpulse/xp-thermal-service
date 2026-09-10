@@ -2,7 +2,7 @@
 
 Audience: on-site IT installer. Symptom-first. Each entry states how to confirm the cause before applying a fix.
 
-See [install.md](install.md) for deployment, [daily-use.md](daily-use.md) for normal operation.
+See [install.md](install.md) for deployment, [daily-use.md](daily-use.md) for normal operation, [web-integration.md](web-integration.md) for API integration issues.
 
 ---
 
