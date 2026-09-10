@@ -6,7 +6,20 @@ param(
     [switch]$Verbose  # Show verbose output
 )
 
-$ServiceName = "XP Thermal Print Service"
+# The service's Name is "xpthermalprintservice.exe"; "XP Thermal Print Service"
+# is its DisplayName. Get-Service -Name resolves display names too, so detection
+# worked - but sc.exe does NOT, and -Fix called
+#     sc.exe config "XP Thermal Print Service" start= auto
+# which fails with 1060 "service does not exist". Resolve the real Name the same
+# way install.ps1 does (current name, legacy names, then display name) and hand
+# sc.exe that.
+$ServiceName        = "xpthermalprintservice.exe"
+$ServiceDisplayName = "XP Thermal Print Service"
+$LegacyServiceNames = @(
+    "XPThermalService",
+    "xpthermalservice.exe",
+    "XP Thermal Print Service"
+)
 $InstallPath = "$env:ProgramData\XPThermalService"
 $PortStart = 9100
 $PortRange = 10
@@ -31,18 +44,34 @@ function Write-Check($description, $status, $detail = "") {
     }
 }
 
+function Get-XPService {
+    foreach ($name in (@($ServiceName) + $LegacyServiceNames)) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($svc) { return $svc }
+    }
+    return Get-Service -DisplayName $ServiceDisplayName -ErrorAction SilentlyContinue
+}
+
+# The Name the service is actually registered under, for sc.exe / Start-Service.
+# Falls back to the expected name so the -Fix messages stay sensible when
+# nothing is installed yet.
+function Get-XPServiceName {
+    $svc = Get-XPService
+    if ($svc) { return $svc.Name }
+    return $ServiceName
+}
+
 function Test-ServiceInstalled {
-    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    return $null -ne $svc
+    return $null -ne (Get-XPService)
 }
 
 function Test-ServiceRunning {
-    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $svc = Get-XPService
     return $svc -and $svc.Status -eq 'Running'
 }
 
 function Test-ServiceAutoStart {
-    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $svc = Get-XPService
     return $svc -and $svc.StartType -eq 'Automatic'
 }
 
@@ -123,15 +152,16 @@ if ($node) {
 Write-Header "Windows Service"
 
 if (Test-ServiceInstalled) {
-    Write-Check "Service installed" "OK" $ServiceName
-    
+    $resolvedServiceName = Get-XPServiceName
+    Write-Check "Service installed" "OK" $resolvedServiceName
+
     if (Test-ServiceAutoStart) {
         Write-Check "Auto-start enabled" "OK"
     } else {
         Write-Check "Auto-start enabled" "WARN" "Service won't start on boot"
         if ($Fix) {
             Write-Host "  Attempting fix..." -ForegroundColor Yellow
-            & sc.exe config "$ServiceName" start= auto 2>&1 | Out-Null
+            & sc.exe config "$resolvedServiceName" start= auto 2>&1 | Out-Null
         }
     }
     
@@ -141,7 +171,7 @@ if (Test-ServiceInstalled) {
         Write-Check "Service running" "FAIL" "Service is not running"
         if ($Fix) {
             Write-Host "  Attempting to start service..." -ForegroundColor Yellow
-            Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            Start-Service -Name $resolvedServiceName -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             if (Test-ServiceRunning) {
                 Write-Check "Service started" "OK"
@@ -278,7 +308,7 @@ $issues = @()
 if (-not (Test-ServiceInstalled)) {
     $issues += "Service not installed - run install.ps1"
 } elseif (-not (Test-ServiceRunning)) {
-    $issues += "Service not running - run: Start-Service '$ServiceName'"
+    $issues += "Service not running - run: Start-Service '$(Get-XPServiceName)'"
 }
 
 if (-not $activePort) {
