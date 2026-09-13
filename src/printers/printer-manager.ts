@@ -124,6 +124,14 @@ export function bucketPrinterStates(
 export class PrinterManager extends EventEmitter {
   private printers: Map<string, PrinterAdapter> = new Map();
   private configs: Map<string, PrinterConfig> = new Map();
+  /**
+   * Printers in config that could not be turned into an adapter at all.
+   *
+   * Kept separate from `printers` because they have no adapter to ask for
+   * state, and separate from silence because a printer the operator configured
+   * and cannot see is a printer they will assume is working.
+   */
+  private misconfigured: Map<string, { config: PrinterConfig; reason: string }> = new Map();
   private defaultPrinterId: string | null = null;
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private readonly logger: Logger;
@@ -167,9 +175,33 @@ export class PrinterManager extends EventEmitter {
       this.setHealthInterval(Math.min(this.healthCheckInterval, 8000));
     });
 
-    // Register printers from config
+    /*
+     * Register printers from config.
+     *
+     * Every registration is isolated. This loop used to be bare, so a single
+     * unconstructable printer — a network entry with no host, a type this build
+     * does not know — threw out of the PrinterManager constructor and took the
+     * whole service down before the API server ever bound. One misconfigured
+     * printer meant no printing at all, including from the printers that were
+     * perfectly fine and listed after it.
+     *
+     * A printer that cannot be built is now recorded as a configured printer in
+     * a permanent fault state, which is exactly what it is. It shows up in the
+     * dashboard and in /health with the reason it could not start, the others
+     * keep working, and the operator can fix it from the UI instead of from a
+     * service that will not boot.
+     */
     for (const printerConfig of config.printers) {
-      this.registerPrinter(printerConfig);
+      try {
+        this.registerPrinter(printerConfig);
+      } catch (error) {
+        const why = (error as Error).message;
+        this.logger.error(
+          { printerId: printerConfig.id, error: why },
+          'Printer could not be registered and has been marked as misconfigured'
+        );
+        this.misconfigured.set(printerConfig.id, { config: printerConfig, reason: why });
+      }
     }
 
     // Auto-connect if enabled
@@ -275,10 +307,26 @@ export class PrinterManager extends EventEmitter {
   }
 
   /**
+   * Why a configured printer has no adapter, or null if that is not the case.
+   *
+   * Lets callers tell "there is no such printer" apart from "that printer
+   * exists and is broken for this specific reason" — the difference between
+   * sending someone to check their POS configuration and sending them to fix
+   * the printer entry they already have.
+   */
+  getMisconfiguredReason(printerId: string): string | null {
+    return this.misconfigured.get(printerId)?.reason ?? null;
+  }
+
+  /**
    * Register a new printer
    */
   registerPrinter(config: PrinterConfig): void {
     this.configs.set(config.id, config);
+    // A re-registration is the operator correcting the entry. Drop any previous
+    // failure so a fixed printer stops being reported as broken; if this call
+    // throws, the caller records it again.
+    this.misconfigured.delete(config.id);
 
     // Create adapter based on type
     let adapter: PrinterAdapter;
@@ -406,6 +454,7 @@ export class PrinterManager extends EventEmitter {
       adapter.removeAllListeners();
       this.printers.delete(printerId);
     }
+    this.misconfigured.delete(printerId);
     this.configs.delete(printerId);
 
     if (this.defaultPrinterId === printerId) {
@@ -462,6 +511,29 @@ export class PrinterManager extends EventEmitter {
       printers.push({
         ...config,
         state: adapter.state
+      });
+    }
+
+    // Printers that failed to construct are reported too, in a fault state that
+    // carries the reason. Omitting them would make a misconfigured printer
+    // silently vanish from the dashboard — the operator sees three printers
+    // where they configured four and has nothing to act on.
+    for (const [id, entry] of this.misconfigured) {
+      printers.push({
+        ...entry.config,
+        state: {
+          id,
+          status: PrinterStatus.ERROR,
+          lastSeen: 0,
+          lastError: entry.reason,
+          consecutiveFailures: 0,
+          totalJobsPrinted: 0,
+          isConnected: false,
+          reason: entry.reason,
+          // Nothing automated can fix a configuration mistake; the operator
+          // must correct the entry itself.
+          healable: false
+        }
       });
     }
 
@@ -814,11 +886,15 @@ export class PrinterManager extends EventEmitter {
     const counts = bucketPrinterStates(
       [...this.printers.values()].map((adapter) => adapter.state.status)
     );
+    // Misconfigured printers are configured printers that cannot print, so they
+    // count toward both the total and the fault tally. Leaving them out would
+    // let /health report "all printers online" while an entry the operator can
+    // see in the dashboard has never once connected.
     return {
-      total: this.printers.size,
+      total: this.printers.size + this.misconfigured.size,
       online: counts.online,
       offline: counts.offline,
-      error: counts.error,
+      error: counts.error + this.misconfigured.size,
       busy: counts.busy,
       initializing: this._initializing
     };

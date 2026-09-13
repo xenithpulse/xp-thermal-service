@@ -266,6 +266,7 @@
   }
   .toast.success { background: #16a34a; }
   .toast.error { background: #dc2626; }
+  .toast.warn { background: #d97706; }
   @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
   /* ── Queue State Bar ── */
@@ -624,8 +625,18 @@
       
       <div class="form-row">
         <div class="form-group">
-          <label>Printer ID</label>
-          <input type="text" id="pId" placeholder="e.g. receipt, kitchen">
+          <label>What is this printer for?</label>
+          <select id="pRole">
+            <option value="receipt">Receipt — customer bills, drives the cash drawer</option>
+            <option value="kitchen">Kitchen (KOT) — order tickets, text only</option>
+            <option value="bar">Bar — drink orders</option>
+            <option value="label">Labels — item or packaging labels</option>
+            <option value="__custom">Something else (enter an ID)…</option>
+          </select>
+          <input type="text" id="pId" placeholder="e.g. counter2" style="display:none;margin-top:8px">
+          <div id="pIdHint" style="font-size:11px;color:var(--text-dim);margin-top:5px">
+            This is the ID the POS sends jobs to. Picking a role sets it for you.
+          </div>
         </div>
         <div class="form-group">
           <label>Display Name</label>
@@ -886,6 +897,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Printer type toggle
   document.getElementById('pType').addEventListener('change', toggleTypeFields);
+  document.getElementById('pRole').addEventListener('change', syncRoleField);
+  // Once the operator edits the name themselves, stop suggesting one.
+  document.getElementById('pName').addEventListener('input', (e) => {
+    e.target.dataset.touched = '1';
+  });
 
   // Delegated actions on the whole document
   document.addEventListener('click', function(e) {
@@ -1638,12 +1654,51 @@ function toggleTypeFields() {
   document.getElementById('networkFields').style.display = type === 'network' ? '' : 'none';
 }
 
+/**
+ * The ID the POS addresses is chosen from a list, not typed.
+ *
+ * A typo here is silent and total: the POS sends to "kitchen", the printer is
+ * saved as "kitchn", and every ticket fails with PRINTER_NOT_FOUND and
+ * dead-letters after a few seconds of retries. Nothing in the UI would have
+ * shown the mismatch, because both halves look correct on their own screen.
+ *
+ * The four roles cover essentially every install. "Something else" stays for
+ * the sites that genuinely need a fifth printer, and only that path can still
+ * produce a typo.
+ */
+function syncRoleField() {
+  const role = document.getElementById('pRole').value;
+  const idInput = document.getElementById('pId');
+  const hint = document.getElementById('pIdHint');
+  const custom = role === '__custom';
+
+  idInput.style.display = custom ? '' : 'none';
+  if (!custom) idInput.value = role;
+
+  hint.textContent = custom
+    ? 'Use lowercase letters, numbers, hyphens or underscores. The POS must send jobs to exactly this ID.'
+    : 'This is the ID the POS sends jobs to. Picking a role sets it for you.';
+
+  // Only prefill the display name while it is untouched, so an operator who
+  // typed "Front counter" does not have it overwritten by changing the role.
+  const nameInput = document.getElementById('pName');
+  if (!custom && !nameInput.dataset.touched) {
+    const labels = { receipt: 'Receipt Printer', kitchen: 'Kitchen Printer', bar: 'Bar Printer', label: 'Label Printer' };
+    nameInput.value = labels[role] || '';
+  }
+}
+
 function openAddPrinter() {
   document.getElementById('modalTitle').textContent = 'Add Printer';
   document.getElementById('editPrinterId').value = '';
   document.getElementById('pId').value = '';
   document.getElementById('pId').disabled = false;
+  document.getElementById('pRole').disabled = false;
+  document.getElementById('pRole').value = 'receipt';
   document.getElementById('pName').value = '';
+  delete document.getElementById('pName').dataset.touched;
+  // After pName is cleared, so the role's suggested name survives.
+  syncRoleField();
   document.getElementById('pType').value = 'usb';
   document.getElementById('pPrinterName').value = '';
   document.getElementById('pHost').value = '';
@@ -1761,6 +1816,17 @@ async function editPrinter(id) {
   document.getElementById('editPrinterId').value = id;
   document.getElementById('pId').value = p.id;
   document.getElementById('pId').disabled = true;
+  // The ID is the POS's address for this printer and is never editable here —
+  // changing it would silently orphan every job the POS sends. Show it, locked,
+  // whether it is one of the four roles or a custom id.
+  const roleSelect = document.getElementById('pRole');
+  const knownRole = ['receipt', 'kitchen', 'bar', 'label'].includes(p.id);
+  roleSelect.value = knownRole ? p.id : '__custom';
+  roleSelect.disabled = true;
+  document.getElementById('pId').style.display = knownRole ? 'none' : '';
+  document.getElementById('pIdHint').textContent =
+    `The POS sends jobs to "${p.id}". This cannot be changed after the printer is created.`;
+  document.getElementById('pName').dataset.touched = '1';
   document.getElementById('pName').value = p.name;
   document.getElementById('pType').value = p.type;
   document.getElementById('pPrinterName').value = p.printerName || '';
@@ -1823,6 +1889,39 @@ async function savePrinter() {
   if (!body.id || !body.name) {
     toast('ID and Name are required', 'error');
     return;
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(body.id)) {
+    toast('Printer ID can only contain letters, numbers, hyphens and underscores', 'error');
+    return;
+  }
+
+  // Catch the address mistakes here rather than letting them reach the server
+  // and come back as a rejected save. Same rules as validateNetworkTarget on
+  // the service side; this copy only exists to answer faster.
+  if (type === 'network') {
+    if (!body.host) {
+      toast('A network printer needs an IP address — find it on the printer\'s self-test page', 'error');
+      return;
+    }
+    if (/^https?:\/\//i.test(body.host)) {
+      toast('Enter just the IP address, not a URL', 'error');
+      return;
+    }
+    const quad = body.host.split('.');
+    if (/^[0-9.]+$/.test(body.host) && (quad.length !== 4 || quad.some(n => n === '' || Number(n) > 255))) {
+      toast(`"${body.host}" is not a valid IP address — it needs four numbers 0-255, like 192.168.1.100`, 'error');
+      return;
+    }
+    if (body.port < 1024 || body.port > 65535) {
+      toast('Port must be between 1024 and 65535. Raw ESC/POS printing is almost always 9100', 'error');
+      return;
+    }
+    if (body.port !== 9100) {
+      // Allowed, but worth saying out loud — a wrong port is the second most
+      // common LAN printer mistake after a wrong IP.
+      toast(`Saving with port ${body.port}. Most network thermal printers use 9100.`, 'warn');
+    }
   }
 
   try {

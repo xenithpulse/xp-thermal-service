@@ -13,6 +13,7 @@ import {
   PrinterType,
   PrinterCapabilities
 } from '../types';
+import { validateNetworkTarget } from '../printers/network-diagnosis';
 
 // Default printer capabilities
 const DEFAULT_CAPABILITIES: PrinterCapabilities = {
@@ -56,7 +57,23 @@ const CashDrawerConfigSchema = z.object({
   openOnPrint: z.boolean().default(false)
 });
 
-const PrinterConfigSchema = z.object({
+/**
+ * The shape of a printer entry, without the cross-field rules.
+ *
+ * Split from the strict schema below because loading and saving need different
+ * strictness, and conflating them cost an outage in testing:
+ *
+ * A config.json holding one network printer with no host failed validation for
+ * the WHOLE file, so the service fell back to built-in defaults and came up
+ * with no printers at all. One bad entry silenced a working receipt printer
+ * that merely shared the file with it.
+ *
+ * So: saving is strict (the dashboard refuses bad input at the moment the
+ * operator can still fix it), and loading is lenient (a bad entry is carried
+ * through, fails to build an adapter, and is reported as misconfigured in the
+ * dashboard and in /health — while every other printer keeps working).
+ */
+const PrinterConfigBaseSchema = z.object({
   id: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_-]+$/, 'Printer ID must be alphanumeric with hyphens/underscores'),
   name: z.string().min(1).max(100),
   type: z.nativeEnum(PrinterType),
@@ -84,6 +101,36 @@ const PrinterConfigSchema = z.object({
   capabilities: PrinterCapabilitiesSchema.default(DEFAULT_CAPABILITIES),
   cashDrawer: CashDrawerConfigSchema.optional(),
   metadata: z.record(z.unknown()).optional()
+});
+
+/**
+ * Printer validation used when SAVING.
+ *
+ * host and port are optional at the field level because a USB printer has
+ * neither — but for a NETWORK printer they are mandatory, and nothing used to
+ * enforce that.
+ *
+ * The consequence was not a bad printer, it was a dead service. A network
+ * printer saved without a host passed validation, was written to config.json,
+ * and then threw from the adapter constructor on the next start — inside a bare
+ * registration loop, so the service aborted before reaching any of the printers
+ * listed after it. A blank field in a form took the whole till offline at the
+ * next reboot.
+ *
+ * Refusing it here means the operator is told at the moment they press Save,
+ * which is the only moment they still have the printer in front of them.
+ */
+const PrinterConfigSchema = PrinterConfigBaseSchema.superRefine((printer, ctx) => {
+  if (printer.type !== PrinterType.NETWORK) return;
+
+  const problem = validateNetworkTarget(printer.host, printer.port);
+  if (problem) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: problem,
+      path: [printer.host ? 'port' : 'host']
+    });
+  }
 });
 
 const ServerConfigSchema = z.object({
@@ -127,7 +174,21 @@ const SecurityConfigSchema = z.object({
 
 const QueueConfigSchema = z.object({
   maxConcurrentJobs: z.number().min(1).default(3),
-  maxRetries: z.number().min(0).default(5),
+  /*
+   * Ten attempts, which with the backoff below spans roughly five minutes.
+   *
+   * Five attempts spanned about thirty seconds (1+2+4+8+16), and thirty seconds
+   * is shorter than almost every real interruption: a printer waking from
+   * sleep, a switch renegotiating a link, a LAN printer that dropped Wi-Fi, an
+   * operator power-cycling a jammed unit. The receipt was still perfectly
+   * printable in every one of those cases, and the job was thrown away anyway.
+   *
+   * Five minutes deliberately matches QUEUE_STALL_MS in health-verdict, so the
+   * ordering is: the queue stops draining, health goes degraded and says so,
+   * and only then are jobs abandoned. The reverse ordering — jobs dying before
+   * anything reports a problem — is how receipts go missing silently.
+   */
+  maxRetries: z.number().min(0).default(10),
   retryDelayMs: z.number().min(100).default(1000),
   retryBackoffMultiplier: z.number().min(1).default(2),
   maxRetryDelayMs: z.number().min(1000).default(60000),
@@ -174,7 +235,10 @@ const ServiceConfigSchema = z.object({
   security: SecurityConfigSchema.default({}),
   queue: QueueConfigSchema.default({}),
   logging: LoggingConfigSchema.default({}),
-  printers: z.array(PrinterConfigSchema).default([]),
+  // Lenient on purpose — see PrinterConfigBaseSchema. A printer entry that
+  // cannot produce a working adapter is surfaced as misconfigured at runtime,
+  // never by invalidating the whole file.
+  printers: z.array(PrinterConfigBaseSchema).default([]),
   backup: BackupConfigSchema.default({})
 });
 

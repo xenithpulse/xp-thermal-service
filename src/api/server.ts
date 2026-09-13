@@ -613,7 +613,7 @@ export class ApiServer {
       const printer = this.printerManager.getPrinter(targetPrinterId);
       if (!printer) {
         throw new PrintServiceError(
-          `Printer not found: ${targetPrinterId}`,
+          this.describeMissingPrinter(targetPrinterId),
           ErrorCodes.PRINTER_NOT_FOUND,
           404
         );
@@ -926,7 +926,7 @@ export class ApiServer {
 
       if (!printer) {
         throw new PrintServiceError(
-          `Printer not found: ${printerId}`,
+          this.describeMissingPrinter(printerId),
           ErrorCodes.PRINTER_NOT_FOUND,
           404
         );
@@ -1606,19 +1606,53 @@ export class ApiServer {
 
       cm.addPrinter(req.body);
 
-      // Live-register the printer in the manager and connect it
+      /*
+       * Live-register, then report what actually happened.
+       *
+       * Registering and connecting fail for different reasons and deserve
+       * different answers. This used to collapse both into a warning in the log
+       * and an unconditional 201 "Printer added and activated." — so a network
+       * printer with a bad address was reported as working, and stayed wrong
+       * until someone noticed receipts were missing.
+       */
+      let warning: string | undefined;
+
       try {
         this.printerManager.registerPrinter(req.body);
-        if (req.body.enabled !== false) {
+      } catch (registerErr) {
+        // The adapter could not be built at all, so this entry can never print.
+        // It is saved (the operator's work is not thrown away) but the response
+        // says plainly that it is not usable yet.
+        const why = (registerErr as Error).message;
+        this.logger.error({ printerId: req.body?.id, error: why }, 'Printer saved but unusable');
+        res.status(201).json({
+          success: true,
+          usable: false,
+          message: `Printer saved, but it cannot be used yet: ${why}`,
+          printers: cm.getPrinters()
+        });
+        return;
+      }
+
+      if (req.body.enabled !== false) {
+        try {
           await this.printerManager.connectPrinter(req.body.id);
+        } catch (connectErr) {
+          // Registered fine, but the device did not answer. Normal and often
+          // temporary — a printer that is switched off, a LAN printer asleep —
+          // so this is a warning on a successful save, not a failure.
+          warning = (connectErr as Error).message;
+          this.logger.warn({ printerId: req.body?.id, error: warning }, 'Printer added but not reachable');
         }
-      } catch (connectErr) {
-        this.logger.warn(`Printer added but failed to connect: ${(connectErr as Error).message}`);
       }
 
       res.status(201).json({
         success: true,
-        message: 'Printer added and activated.',
+        usable: true,
+        message: warning
+          ? 'Printer saved. It is not responding yet — it will connect automatically when it becomes reachable.'
+          : 'Printer added and activated.',
+        warning,
         printers: cm.getPrinters()
       });
     } catch (error) {
@@ -1704,6 +1738,39 @@ export class ApiServer {
     }
 
     res.status(404).send('Dashboard not found. Ensure public/dashboard.html exists.');
+  }
+
+  /**
+   * Explain a printer id that did not resolve.
+   *
+   * "Printer not found: kitchen" is true in three quite different situations,
+   * and the operator's next step differs in each:
+   *
+   *   - the id is a typo, and the printers that DO exist are worth naming
+   *   - the printer is configured but could not start, so the reason is known
+   *   - nothing is configured at all
+   *
+   * Naming the available ids matters most. The POS addressing "kitchen" while
+   * the printer was saved as "kitchn" produces jobs that fail and dead-letter
+   * within seconds, and nothing anywhere used to show the two spellings side
+   * by side.
+   */
+  private describeMissingPrinter(printerId: string): string {
+    const misconfigured = this.printerManager.getMisconfiguredReason(printerId);
+    if (misconfigured) {
+      return `Printer "${printerId}" is configured but cannot be used: ${misconfigured}`;
+    }
+
+    const available = this.printerManager.getAllPrinters().map((p) => p.id);
+    if (available.length === 0) {
+      return `Printer not found: "${printerId}". No printers are configured — add one in the dashboard.`;
+    }
+
+    return (
+      `Printer not found: "${printerId}". Configured printers are: ` +
+      `${available.map((id) => `"${id}"`).join(', ')}. ` +
+      `Check that the POS is sending the same id the printer was saved under.`
+    );
   }
 
   private handleError(error: unknown, res: Response): void {

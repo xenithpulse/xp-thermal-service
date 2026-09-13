@@ -6,6 +6,11 @@
 import * as net from 'net';
 import { BasePrinterAdapter, PrintResult } from './base-adapter';
 import {
+  diagnoseNetworkError,
+  validateNetworkTarget,
+  RAW_PRINT_PORT
+} from './network-diagnosis';
+import {
   PrinterConfig,
   PrinterStatus,
   ErrorCodes
@@ -29,18 +34,27 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
 
   constructor(config: PrinterConfig) {
     super(config);
-    
-    if (!config.host || !config.port) {
-      throw new Error('Network printer requires host and port');
+
+    // Say what is wrong and how to fix it. The old message was
+    // "Network printer requires host and port", which is true and useless:
+    // it does not say where to find the printer's IP, and it reached the
+    // operator as a raw exception string.
+    const invalid = validateNetworkTarget(config.host, config.port);
+    if (invalid) {
+      throw new Error(invalid);
     }
 
-    // Validate port range — block well-known non-printer ports to prevent SSRF
-    if (config.port < 1024 || config.port > 65535) {
-      throw new Error(`Invalid printer port: ${config.port}. Must be 1024-65535.`);
+    // Validate port range — block well-known non-printer ports to prevent SSRF.
+    // validateNetworkTarget has already ruled out non-integers and 0/65535+.
+    if (config.port! < 1024) {
+      throw new Error(
+        `Port ${config.port} is below 1024 and cannot be used. Raw ESC/POS printing ` +
+        `is almost always on ${RAW_PRINT_PORT}.`
+      );
     }
-    
-    this.host = config.host;
-    this.port = config.port;
+
+    this.host = config.host!;
+    this.port = config.port!;
   }
 
   async connect(): Promise<void> {
@@ -74,6 +88,11 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
       // Connection timeout
       const timeoutId = setTimeout(() => {
         socket.destroy();
+        // Nothing answered, so the printer is offline. Without this the state
+        // stayed at its initial UNKNOWN, which reads as "not checked yet"
+        // rather than "checked, and it is not there".
+        this.updateState({ status: PrinterStatus.OFFLINE, isConnected: false });
+        this.applyDiagnosis({ code: 'ETIMEDOUT' });
         reject(this.createError(
           `Connection timeout to ${this.host}:${this.port}`,
           ErrorCodes.PRINTER_TIMEOUT
@@ -85,6 +104,12 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
         this.socket = socket;
         this.setupSocketListeners();
         this.handleConnectionSuccess();
+        // Clear any previous failure sentence, otherwise a printer that has
+        // recovered keeps showing the reason it was broken an hour ago.
+        this.updateState({
+          reason: `Connected to ${this.host}:${this.port}`,
+          healable: false
+        });
         this.startHealthCheck();
         resolve();
       });
@@ -92,10 +117,33 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
       socket.once('error', (error) => {
         clearTimeout(timeoutId);
         this.handleConnectionError(error);
+        // handleConnectionError stores the raw errno in lastError; replace the
+        // operator-facing half with a sentence that names the cause and the fix.
+        this.applyDiagnosis(error);
         reject(error);
       });
 
       socket.connect(this.port, this.host);
+    });
+  }
+
+  /**
+   * Translate a socket failure into the state the dashboard reads.
+   *
+   * `reason` is the sentence shown under the printer name, and it carries the
+   * fix as well as the cause: the operator is usually not the person who set
+   * the printer up, so a reason without a next step just relocates the problem.
+   *
+   * `healable` stays false for every network fault. The USB repair path fixes
+   * things this service owns — a stale offline flag, a queue bound to the wrong
+   * port. Nothing here is ours to repair: a wrong IP needs the right IP typed
+   * in, and offering a Repair button that cannot work is worse than none.
+   */
+  private applyDiagnosis(error: { code?: string; message?: string }): void {
+    const d = diagnoseNetworkError(error, this.host, this.port);
+    this.updateState({
+      reason: `${d.reason} ${d.fix}`,
+      healable: false
     });
   }
 
@@ -105,8 +153,9 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
     this.socket.on('error', (error) => {
       this._state.lastError = error.message;
       this._state.consecutiveFailures++;
+      this.applyDiagnosis(error as NodeJS.ErrnoException);
       this.emit('error', error);
-      
+
       if (!this.reconnecting) {
         this.handleDisconnect();
       }
