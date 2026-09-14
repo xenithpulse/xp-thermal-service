@@ -9,7 +9,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ConfigManager } from '../src/utils/config';
+import { ConfigManager, DEFAULT_MAX_RETRIES } from '../src/utils/config';
 import { PrinterType } from '../src/types';
 
 let dir: string;
@@ -196,5 +196,62 @@ describe('ConfigManager writing', () => {
     for (const name of ['XP-80C @ Kitchen', 'HP LaserJet M15w+', "Bob's Printer", 'Drucker (Küche)']) {
       expect(() => cm.updatePrinter('receipt', { printerName: name })).not.toThrow();
     }
+  });
+});
+
+describe('retry window migration', () => {
+  /*
+   * The default retry window moved from ~31s to ~5min. Defaults only reach new
+   * installs, so existing configs are migrated on load — but only when the
+   * value looks like an inherited default rather than a deliberate choice.
+   */
+  function writeWithRetries(maxRetries: number): void {
+    write(JSON.stringify({ ...TWO_PRINTERS, queue: { maxRetries } }));
+  }
+
+  function savedRetries(): number {
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^﻿/, ''));
+    return parsed.queue.maxRetries;
+  }
+
+  it('raises the old default of 5', () => {
+    writeWithRetries(5);
+    expect(new ConfigManager(configPath).getQueueConfig().maxRetries).toBe(DEFAULT_MAX_RETRIES);
+  });
+
+  it('raises anything below the old default', () => {
+    writeWithRetries(3);
+    expect(new ConfigManager(configPath).getQueueConfig().maxRetries).toBe(DEFAULT_MAX_RETRIES);
+  });
+
+  it('persists the migration so it is visible in the file', () => {
+    // Otherwise the value is silently re-applied on every start and the
+    // Settings screen disagrees with what the service is enforcing.
+    writeWithRetries(3);
+    new ConfigManager(configPath);
+    expect(savedRetries()).toBe(DEFAULT_MAX_RETRIES);
+  });
+
+  it('leaves a deliberately higher value alone', () => {
+    writeWithRetries(20);
+    expect(new ConfigManager(configPath).getQueueConfig().maxRetries).toBe(20);
+  });
+
+  it('leaves the new default alone', () => {
+    writeWithRetries(DEFAULT_MAX_RETRIES);
+    expect(new ConfigManager(configPath).getQueueConfig().maxRetries).toBe(DEFAULT_MAX_RETRIES);
+  });
+
+  it('respects 0, which means "never retry"', () => {
+    // A site that turned retries off did so on purpose; turning them back on
+    // would print duplicates they explicitly did not want.
+    writeWithRetries(0);
+    expect(new ConfigManager(configPath).getQueueConfig().maxRetries).toBe(0);
+  });
+
+  it('does not lose printers while migrating', () => {
+    writeWithRetries(3);
+    new ConfigManager(configPath);
+    expect(readPrinterIds()).toEqual(['receipt', 'kitchen']);
   });
 });

@@ -15,6 +15,20 @@ import {
 } from '../types';
 import { validateNetworkTarget } from '../printers/network-diagnosis';
 
+/**
+ * Retry attempts for a print job. With the 1s base and x2 backoff capped at
+ * 60s, ten attempts span ~303 seconds — deliberately just past the 300s
+ * QUEUE_STALL_MS in health-verdict, so health reports a stalled queue before
+ * jobs start being abandoned rather than after.
+ */
+export const DEFAULT_MAX_RETRIES = 10;
+
+/**
+ * The previous default (~31s of retries). Configs at or below this are raised
+ * on load; anything above it was chosen deliberately and is left alone.
+ */
+export const LEGACY_MAX_RETRIES = 5;
+
 // Default printer capabilities
 const DEFAULT_CAPABILITIES: PrinterCapabilities = {
   maxWidth: 48,
@@ -188,7 +202,7 @@ const QueueConfigSchema = z.object({
    * and only then are jobs abandoned. The reverse ordering — jobs dying before
    * anything reports a problem — is how receipts go missing silently.
    */
-  maxRetries: z.number().min(0).default(10),
+  maxRetries: z.number().min(0).default(DEFAULT_MAX_RETRIES),
   retryDelayMs: z.number().min(100).default(1000),
   retryBackoffMultiplier: z.number().min(1).default(2),
   maxRetryDelayMs: z.number().min(1000).default(60000),
@@ -259,18 +273,22 @@ export class ConfigManager {
   /** Set during load when POS origins had to be merged in. */
   private pendingPosOriginSave = false;
 
+  /** Set during load when a too-short retry window was migrated. */
+  private pendingQueueRetrySave = false;
+
   constructor(configPath?: string) {
     this.configPath = configPath || this.getDefaultConfigPath();
     this.config = this.loadConfig();
 
-    // Persist the merged POS origins once, after load has finished, so the
-    // file reflects what the service is actually enforcing.
-    if (this.pendingPosOriginSave && !this.loadFailed) {
+    // Persist load-time migrations once, after load has finished, so the file
+    // reflects what the service is actually enforcing.
+    if ((this.pendingPosOriginSave || this.pendingQueueRetrySave) && !this.loadFailed) {
       this.pendingPosOriginSave = false;
+      this.pendingQueueRetrySave = false;
       try {
         this.saveConfig();
       } catch (error) {
-        console.warn('Could not persist POS origins:', (error as Error).message);
+        console.warn('Could not persist config migrations:', (error as Error).message);
       }
     }
   }
@@ -394,6 +412,34 @@ export class ConfigManager {
       // as a visible part of the configuration, rather than being invisibly
       // re-applied on every start.
       this.pendingPosOriginSave = true;
+    }
+
+    /*
+     * Widen a retry window that is too short to survive a printer restart.
+     *
+     * The default moved from 5 attempts (~31s) to 10 (~5min) because 31 seconds
+     * is shorter than almost every real interruption — a printer waking from
+     * sleep, a switch renegotiating, an operator clearing a jam. The receipt is
+     * still printable in every one of those cases; it was being thrown away.
+     *
+     * Defaults only reach NEW installs, and the sites that most need this are
+     * the ones already running. So existing configs are migrated too.
+     *
+     * Deliberately conservative: only values at or below the OLD default are
+     * raised. A site that chose 7, or 20, or 0 has expressed an intent, and
+     * silently overriding a deliberate setting is how upgrades lose trust.
+     */
+    if (config.queue.maxRetries > 0 && config.queue.maxRetries <= LEGACY_MAX_RETRIES) {
+      const previous = config.queue.maxRetries;
+      config.queue.maxRetries = DEFAULT_MAX_RETRIES;
+      console.log(
+        `Raised queue.maxRetries from ${previous} to ${DEFAULT_MAX_RETRIES} so a job ` +
+        `survives a printer that is briefly unreachable (about 5 minutes of retries ` +
+        `instead of ${previous === 5 ? '31 seconds' : 'a few seconds'}).`
+      );
+      // Written through so the new value is visible in config.json rather than
+      // being re-applied invisibly on every start.
+      this.pendingQueueRetrySave = true;
     }
 
     // Auto-generate API key if auth is enabled but no key is set
