@@ -1394,8 +1394,13 @@ function renderPrinters(printers) {
       const movedNote = bound && bound !== p.printerName
         ? `<div style="font-size:10px;color:var(--accent-light);margin-top:2px">followed to: ${esc(bound)}</div>`
         : '';
-      const reason = p.state?.reason && status !== 'online'
-        ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px;max-width:320px">${esc(p.state.reason)}</div>`
+      // Fall back to lastError. Some failures never produce a plain-language
+      // `reason` — a Windows queue that does not exist is the common one, and
+      // its explanation ("No Windows print queue found for ...") lives only in
+      // lastError. Without this the row said "error" and nothing else.
+      const why = p.state?.reason || p.state?.lastError;
+      const reason = why && status !== 'online'
+        ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px;max-width:320px">${esc(why)}</div>`
         : '';
       const roleLabel = { receipt: 'Receipts & bills', kitchen: 'Kitchen tickets', bar: 'Bar orders', label: 'Labels' }[p.id]
         || esc(p.name);
