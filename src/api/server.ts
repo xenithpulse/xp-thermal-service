@@ -5,6 +5,7 @@
  */
 
 import express, { Express, Request, Response, NextFunction } from 'express';
+import * as net from 'net';
 import * as http from 'http';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -19,7 +20,18 @@ import { ConfigManager } from '../utils/config';
 import type { BackupScheduler } from '../backup/backup-scheduler';
 import { USBPrinterAdapter } from '../printers/usb-adapter';
 import { PrinterDiscovery } from '../printers/discovery';
-import { buildRoleConfig, isPrinterRole, listRoles } from '../printers/printer-roles';
+import {
+  buildRoleConfig,
+  buildNetworkRoleConfig,
+  isPrinterRole,
+  listRoles
+} from '../printers/printer-roles';
+import {
+  validateNetworkTarget,
+  diagnoseNetworkError,
+  warnAboutPort,
+  RAW_PRINT_PORT
+} from '../printers/network-diagnosis';
 import { findByName } from '../printers/windows-printers';
 import { OriginPolicy } from './origin-policy';
 import { cashDrawerPulse } from '../escpos/builder';
@@ -33,6 +45,7 @@ import {
   JobPriority,
   JobStatus,
   PrintJob,
+  PrinterConfig,
   SecurityConfig,
   PrintServiceError,
   ErrorCodes
@@ -426,6 +439,7 @@ export class ApiServer {
     // routes below, otherwise Express matches "discover" as a printer id.
     this.app.get('/api/printers/discover', this.handleDiscoverPrinters.bind(this));
     this.app.get('/api/printers/roles', this.handleListRoles.bind(this));
+    this.app.post('/api/printers/test-connection', this.handleTestConnection.bind(this));
     this.app.post('/api/printers/setup', this.handleSetupPrinterByRole.bind(this));
     this.app.post('/api/printers/auto-setup', this.handleAutoSetupPrinters.bind(this));
 
@@ -1323,10 +1337,77 @@ export class ApiServer {
    * repoints that role at the new printer, which is what someone replacing a
    * broken unit actually wants.
    */
+  /**
+   * Can this machine reach a printer at this address, right now?
+   *
+   * Answers before anything is saved. Without it, checking a LAN address means
+   * saving a printer, watching it fail, editing it, and repeating — and each
+   * round trip leaves a half-configured printer in config.json.
+   *
+   * Deliberately does not print anything. A connection test that emits paper
+   * cannot be run casually, and the operator is usually standing at a till
+   * during service.
+   */
+  private async handleTestConnection(req: Request, res: Response): Promise<void> {
+    const host = typeof req.body?.host === 'string' ? req.body.host.trim() : '';
+    const port = Number(req.body?.port ?? RAW_PRINT_PORT);
+    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs) || 4000, 500), 15000);
+
+    // Bad input is not a failed connection — say so without opening a socket.
+    const invalid = validateNetworkTarget(host, port);
+    if (invalid) {
+      res.status(400).json({ ok: false, reason: invalid, fix: invalid, retryable: false });
+      return;
+    }
+
+    const started = Date.now();
+    const socket = new net.Socket();
+
+    const finish = (body: Record<string, unknown>, code = 200): void => {
+      socket.removeAllListeners();
+      socket.destroy();
+      if (!res.headersSent) res.status(code).json(body);
+    };
+
+    const timer = setTimeout(() => {
+      const d = diagnoseNetworkError({ code: 'ETIMEDOUT' }, host, port);
+      finish({ ok: false, host, port, ms: Date.now() - started, ...d });
+    }, timeoutMs);
+
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      const ms = Date.now() - started;
+      const warning = warnAboutPort(port);
+      finish({
+        ok: true,
+        host,
+        port,
+        ms,
+        reason: `Connected to ${host}:${port} in ${ms} ms.`,
+        // A socket opening proves something is listening — not that it speaks
+        // ESC/POS. Say exactly that rather than implying a verified printer.
+        fix: warning
+          ? `${warning} Save and print a test receipt to confirm it is the printer.`
+          : 'Something is listening at this address. Save the printer and send a test receipt to confirm it prints.',
+        warning,
+        retryable: false
+      });
+    });
+
+    socket.once('error', (error) => {
+      clearTimeout(timer);
+      const d = diagnoseNetworkError(error as NodeJS.ErrnoException, host, port);
+      finish({ ok: false, host, port, ms: Date.now() - started, ...d });
+    });
+
+    socket.connect(port, host);
+  }
+
   private async handleSetupPrinterByRole(req: Request, res: Response): Promise<void> {
     try {
       const role = req.body?.role;
       const windowsName = typeof req.body?.windowsName === 'string' ? req.body.windowsName.trim() : '';
+      const host = typeof req.body?.host === 'string' ? req.body.host.trim() : '';
       const runTest = req.body?.test !== false;
 
       if (!isPrinterRole(role)) {
@@ -1337,22 +1418,28 @@ export class ApiServer {
         );
       }
 
-      if (!windowsName) {
+      /*
+       * One endpoint, two transports. A caller supplies either a Windows queue
+       * name or a network address, and the role machinery is identical from
+       * there — same derived id, same capability profile, same drawer defaults.
+       *
+       * Until now only windowsName was accepted, so network printers could not
+       * use roles at all and had to go through the manual form.
+       */
+      if (!windowsName && !host) {
         throw new PrintServiceError(
-          'windowsName is required — pick a printer from the discovery list',
+          'Provide either windowsName (pick a printer from the discovery list) ' +
+            'or host and port (for a network printer).',
           ErrorCodes.INVALID_REQUEST,
           400
         );
       }
 
-      const snapshot = await this.printerManager.getPrintSystem().refresh();
-      const windows = findByName(snapshot.printers, windowsName);
-
-      if (!windows) {
+      if (windowsName && host) {
         throw new PrintServiceError(
-          `Windows has no printer called "${windowsName}". It may have been removed or renamed.`,
-          ErrorCodes.PRINTER_NOT_FOUND,
-          404
+          'Provide windowsName or host, not both — a printer is reached one way or the other.',
+          ErrorCodes.INVALID_REQUEST,
+          400
         );
       }
 
@@ -1360,10 +1447,41 @@ export class ApiServer {
       const existing = cm.getPrinter(role);
       // The first printer configured should be the default, whatever its role.
       const makeDefault = cm.getPrinters().length === 0 ? true : undefined;
-      const printerConfig = buildRoleConfig(role, windows, snapshot, {
-        makeDefault,
-        name: req.body?.name
-      });
+
+      let printerConfig: PrinterConfig;
+      let label: string;
+
+      if (host) {
+        const port = Number(req.body?.port ?? RAW_PRINT_PORT);
+        const invalid = validateNetworkTarget(host, port);
+        if (invalid) {
+          throw new PrintServiceError(invalid, ErrorCodes.INVALID_REQUEST, 400);
+        }
+
+        printerConfig = buildNetworkRoleConfig(role, host, port, {
+          makeDefault,
+          name: req.body?.name,
+          maxWidth: Number(req.body?.maxWidth) || undefined
+        });
+        label = `${host}:${port}`;
+      } else {
+        const snapshot = await this.printerManager.getPrintSystem().refresh();
+        const windows = findByName(snapshot.printers, windowsName);
+
+        if (!windows) {
+          throw new PrintServiceError(
+            `Windows has no printer called "${windowsName}". It may have been removed or renamed.`,
+            ErrorCodes.PRINTER_NOT_FOUND,
+            404
+          );
+        }
+
+        printerConfig = buildRoleConfig(role, windows, snapshot, {
+          makeDefault,
+          name: req.body?.name
+        });
+        label = windows.name;
+      }
 
       if (existing) {
         cm.updatePrinter(role, printerConfig);
@@ -1399,8 +1517,8 @@ export class ApiServer {
         reason: adapter?.state.reason,
         testPrinted: runTest && ready,
         message: ready
-          ? `"${windows.name}" is now the ${role} printer.${runTest ? ' A test receipt has been sent.' : ''}`
-          : `"${windows.name}" was saved as the ${role} printer, but it is not ready: ${adapter?.state.reason ?? 'unknown reason'}`
+          ? `"${label}" is now the ${role} printer.${runTest ? ' A test receipt has been sent.' : ''}`
+          : `"${label}" was saved as the ${role} printer, but it is not ready: ${adapter?.state.reason ?? 'unknown reason'}`
       });
     } catch (error) {
       this.handleError(error, res);

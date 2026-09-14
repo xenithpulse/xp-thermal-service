@@ -132,10 +132,83 @@ export function buildRoleConfig(
   options: { makeDefault?: boolean; name?: string } = {}
 ): PrinterConfig {
   const profile = PRINTER_ROLES[role];
-  const width = guessPaperWidth(windows);
 
-  const capabilities: PrinterCapabilities = {
-    maxWidth: width,
+  return {
+    ...baseRoleConfig(role, options),
+    name: options.name?.trim() || `${profile.label} — ${windows.name}`,
+    type: PrinterType.USB,
+    printerName: windows.name,
+    capabilities: roleCapabilities(role, guessPaperWidth(windows)),
+    metadata: {
+      role,
+      ...buildHints(windows, snapshot.usbDevices)
+    }
+  };
+}
+
+/**
+ * The same thing for a printer reached over the network.
+ *
+ * This did not exist, so the whole role-based flow — the one that makes the id
+ * match the role, derives the capability profile, and means the operator never
+ * types anything the POS depends on — was USB-only. A LAN printer had to be
+ * added through the manual form, which is exactly where a mistyped id silently
+ * dead-letters every ticket.
+ *
+ * Two things cannot be derived the way they are for USB, and both are given
+ * honest defaults rather than guesses dressed up as detection:
+ *
+ *   - Paper width. USB reads it from the Windows model name; a network printer
+ *     offers no model over a raw socket, so this takes 48 (80mm) — the common
+ *     case — and lets the caller override it.
+ *   - Identity breadcrumbs. There is no USB device to fingerprint, so the
+ *     address is the identity. Recorded in metadata for the same purpose.
+ */
+export function buildNetworkRoleConfig(
+  role: PrinterRoleId,
+  host: string,
+  port: number,
+  options: { makeDefault?: boolean; name?: string; maxWidth?: number } = {}
+): PrinterConfig {
+  const profile = PRINTER_ROLES[role];
+
+  return {
+    ...baseRoleConfig(role, options),
+    name: options.name?.trim() || `${profile.label} — ${host}`,
+    type: PrinterType.NETWORK,
+    host,
+    port,
+    capabilities: roleCapabilities(role, options.maxWidth ?? 48),
+    metadata: {
+      role,
+      networkHost: host,
+      networkPort: port
+    }
+  };
+}
+
+/** Fields every role config shares, whatever the transport. */
+function baseRoleConfig(
+  role: PrinterRoleId,
+  options: { makeDefault?: boolean }
+): Omit<PrinterConfig, 'type' | 'name' | 'capabilities'> {
+  const profile = PRINTER_ROLES[role];
+  return {
+    // The role IS the id. This is the whole point of roles: the POS addresses
+    // "kitchen" and never has to look anything up.
+    id: profile.id,
+    enabled: true,
+    isDefault: options.makeDefault ?? profile.preferDefault,
+    timeout: 10000,
+    maxRetries: 3,
+    cashDrawer: { ...profile.cashDrawer }
+  };
+}
+
+/** The detected hardware profile with the role's overrides layered on top. */
+function roleCapabilities(role: PrinterRoleId, maxWidth: number): PrinterCapabilities {
+  return {
+    maxWidth,
     supportsBold: true,
     supportsUnderline: true,
     supportsBarcode: true,
@@ -146,23 +219,6 @@ export function buildRoleConfig(
     supportsCashDrawer: false,
     supportsDensity: true,
     codepage: 0,
-    ...profile.capabilities
-  };
-
-  return {
-    id: profile.id,
-    name: options.name?.trim() || `${profile.label} — ${windows.name}`,
-    type: PrinterType.USB,
-    enabled: true,
-    isDefault: options.makeDefault ?? profile.preferDefault,
-    printerName: windows.name,
-    timeout: 10000,
-    maxRetries: 3,
-    capabilities,
-    cashDrawer: { ...profile.cashDrawer },
-    metadata: {
-      role,
-      ...buildHints(windows, snapshot.usbDevices)
-    }
+    ...PRINTER_ROLES[role].capabilities
   };
 }

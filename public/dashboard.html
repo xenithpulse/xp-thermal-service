@@ -192,6 +192,19 @@
   .job-filter:hover { border-color: var(--text-dim); color: var(--text); background: var(--bg-hover); }
   .job-filter.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   .job-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Connection test result. Sits directly under the button that produced it,
+     so the answer and the question stay together. */
+  .conn-result {
+    margin-top: 10px; padding: 10px 12px; border-radius: 6px;
+    border: 1px solid var(--border); border-left: 3px solid var(--text-dim);
+    background: var(--bg-hover); font-size: 12.5px; line-height: 1.5;
+  }
+  .conn-result.ok      { border-left-color: var(--green); }
+  .conn-result.fail    { border-left-color: var(--red); }
+  .conn-result.testing { border-left-color: var(--yellow); }
+  .conn-result .cr-head { font-weight: 600; color: var(--text); margin-bottom: 3px; }
+  .conn-result .cr-fix  { color: var(--text-dim); }
+
   /* Health reasons banner. Severity is carried by the left stripe rather than
      a fill, so it reads as information rather than an alarm on every load. */
   .health-reasons {
@@ -723,6 +736,12 @@
             <input type="number" id="pPort" value="9100">
           </div>
         </div>
+        <button type="button" class="btn btn-outline btn-sm" id="btnTestConn">Test connection</button>
+        <div id="testConnResult" class="conn-result" hidden></div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:7px">
+          The IP is on the printer's self-test page, or in its display menu under Network.
+          Give it a static address or a DHCP reservation so it does not move.
+        </div>
       </div>
 
       <div class="form-row">
@@ -945,6 +964,14 @@ document.addEventListener('DOMContentLoaded', function() {
   // Printer type toggle
   document.getElementById('pType').addEventListener('change', toggleTypeFields);
   document.getElementById('pRole').addEventListener('change', syncRoleField);
+  document.getElementById('btnTestConn').addEventListener('click', testConnection);
+  // A changed address invalidates the previous result; leaving it on screen
+  // would show a green tick for an address nobody tested.
+  ['pHost', 'pPort'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+      document.getElementById('testConnResult').hidden = true;
+    });
+  });
   document.querySelectorAll('.job-filter').forEach(btn => {
     btn.addEventListener('click', () => setJobFilter(btn.dataset.filter, btn));
   });
@@ -1789,6 +1816,42 @@ function toggleTypeFields() {
  * the sites that genuinely need a fifth printer, and only that path can still
  * produce a typo.
  */
+/**
+ * Probe the entered address before anything is saved.
+ *
+ * Without this, checking a LAN address means saving a printer, watching it
+ * fail, editing it and repeating — and every round trip leaves a
+ * half-configured printer behind in config.json.
+ */
+async function testConnection() {
+  const box = document.getElementById('testConnResult');
+  const btn = document.getElementById('btnTestConn');
+  const host = document.getElementById('pHost').value.trim();
+  const port = parseInt(document.getElementById('pPort').value) || 9100;
+
+  const show = (cls, head, fix) => {
+    box.className = 'conn-result ' + cls;
+    box.innerHTML = `<div class="cr-head">${esc(head)}</div>` + (fix ? `<div class="cr-fix">${esc(fix)}</div>` : '');
+    box.hidden = false;
+  };
+
+  show('testing', `Connecting to ${host || '…'}:${port}…`, '');
+  btn.disabled = true;
+
+  try {
+    // api() returns the parsed body whatever the status code, and a rejected
+    // address comes back as a 400 carrying the same {reason, fix} shape as a
+    // failed connection — so both render the same way.
+    const d = await api('POST', '/api/printers/test-connection', { host, port });
+    show(d.ok ? 'ok' : 'fail', d.reason || 'The test did not return a result', d.fix);
+  } catch (e) {
+    // Only reached if the service itself is unreachable.
+    show('fail', 'Could not reach the print service to run the test', (e && e.message) || '');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function syncRoleField() {
   const role = document.getElementById('pRole').value;
   const idInput = document.getElementById('pId');

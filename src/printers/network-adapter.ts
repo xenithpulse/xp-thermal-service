@@ -10,6 +10,7 @@ import {
   validateNetworkTarget,
   RAW_PRINT_PORT
 } from './network-diagnosis';
+import { readStatus, statusRequest, DLE_EOT } from './escpos-status';
 import {
   PrinterConfig,
   PrinterStatus,
@@ -314,53 +315,98 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
     });
   }
 
+  /**
+   * Ask the printer how it is, and record the answer.
+   *
+   * Two bugs lived here. The first was silent: every early return handed a
+   * status back to the caller without writing it to state, and the reconcile
+   * loop reads `adapter.state`, not this return value — so a network printer
+   * sat on whatever state it happened to have, usually the initial UNKNOWN.
+   *
+   * The second was a misread. It sent `DLE EOT 1` and interpreted bit 3 as
+   * paper-out and bit 2 as cover-open; under n=1 those are *offline* and *the
+   * cash drawer pin*. See escpos-status.ts for the bit tables.
+   *
+   * Everything now goes through `settle`, so there is one place where state is
+   * written and no path can skip it.
+   */
   async getStatus(): Promise<PrinterStatus> {
+    const settle = (status: PrinterStatus, reason: string | null): PrinterStatus => {
+      this.updateState({
+        status,
+        isConnected: status !== PrinterStatus.OFFLINE && this.socket !== null && !this.socket.destroyed,
+        ...(reason !== null ? { reason } : {}),
+        ...(status === PrinterStatus.ONLINE ? { lastSeen: Date.now() } : {})
+      });
+      return status;
+    };
+
     if (!this.socket || this.socket.destroyed) {
-      return PrinterStatus.OFFLINE;
+      return settle(
+        PrinterStatus.OFFLINE,
+        `Not connected to ${this.host}:${this.port}`
+      );
     }
 
     try {
-      // Send DLE EOT status request (standard ESC/POS)
-      const statusCommand = Buffer.from([0x10, 0x04, 0x01]);
-      
-      // Create a promise that times out quickly for status check
-      const response = await Promise.race([
-        this.sendStatusRequest(statusCommand),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000))
+      const printer = await this.queryStatus(DLE_EOT.PRINTER);
+
+      if (printer === null) {
+        /*
+         * No reply. The socket is open, so bytes are reaching something — but
+         * plenty of cheap units simply do not implement real-time status over
+         * a raw socket, and calling those faulty would take working printers
+         * offline.
+         *
+         * So: online, and say the claim is weaker than it looks. This is the
+         * one place a network printer is less trustworthy than a USB one,
+         * which reads the Windows spooler rather than asking the device.
+         */
+        return settle(
+          PrinterStatus.ONLINE,
+          `Connected to ${this.host}:${this.port}. The printer does not report ` +
+            `its status, so paper and cover faults cannot be detected remotely.`
+        );
+      }
+
+      // Only ask why when the printer says something is wrong. Two extra round
+      // trips on every poll of a healthy printer would be pure waste.
+      const verdict = readStatus({ printer });
+      if (verdict.status === PrinterStatus.ONLINE || verdict.status === PrinterStatus.UNKNOWN) {
+        const paper = await this.queryStatus(DLE_EOT.PAPER);
+        const full = readStatus({ printer, paper: paper ?? undefined });
+        return settle(full.status, full.reason ?? `Ready at ${this.host}:${this.port}`);
+      }
+
+      const [offlineCause, paper] = await Promise.all([
+        this.queryStatus(DLE_EOT.OFFLINE_CAUSE),
+        this.queryStatus(DLE_EOT.PAPER)
       ]);
 
-      if (response === null) {
-        // Timeout - assume online if socket is connected
-        return PrinterStatus.ONLINE;
-      }
-
-      // Parse status response if we got one
-      if (response instanceof Buffer && response.length > 0) {
-        const status = response[0];
-        
-        if (status & 0x08) {
-          this.updateState({ status: PrinterStatus.PAPER_OUT });
-          return PrinterStatus.PAPER_OUT;
-        }
-        if (status & 0x04) {
-          this.updateState({ status: PrinterStatus.COVER_OPEN });
-          return PrinterStatus.COVER_OPEN;
-        }
-        if (status & 0x20) {
-          this.updateState({ status: PrinterStatus.ERROR });
-          return PrinterStatus.ERROR;
-        }
-      }
-
-      this.updateState({ status: PrinterStatus.ONLINE, lastSeen: Date.now() });
-      return PrinterStatus.ONLINE;
-      
+      const full = readStatus({
+        printer,
+        offlineCause: offlineCause ?? undefined,
+        paper: paper ?? undefined
+      });
+      return settle(full.status, full.reason);
     } catch {
-      // If we can't get status but socket is connected, assume online
-      return this.socket && !this.socket.destroyed 
-        ? PrinterStatus.ONLINE 
-        : PrinterStatus.OFFLINE;
+      // The socket broke mid-query, which is itself the answer.
+      const alive = this.socket !== null && !this.socket.destroyed;
+      return alive
+        ? settle(PrinterStatus.ONLINE, null)
+        : settle(PrinterStatus.OFFLINE, `Lost the connection to ${this.host}:${this.port}`);
     }
+  }
+
+  /** One `DLE EOT n` round trip, or null if the printer does not answer. */
+  private async queryStatus(n: number): Promise<number | null> {
+    const response = await Promise.race([
+      this.sendStatusRequest(statusRequest(n)),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000))
+    ]);
+
+    if (!(response instanceof Buffer) || response.length === 0) return null;
+    return response[0];
   }
 
   private sendStatusRequest(command: Buffer): Promise<Buffer | null> {
