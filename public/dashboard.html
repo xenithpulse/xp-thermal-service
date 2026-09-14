@@ -175,6 +175,46 @@
   }
   .btn-outline:hover { border-color: var(--text-dim); color: var(--text); background: var(--bg-hover); filter: none; }
   .btn-ghost { background: transparent; color: var(--text-dim); padding: 5px 8px; }
+
+  /* Job status filters. A count badge appears on "Needs attention" whenever
+     anything is failed or dead-lettered, so the tab that matters advertises
+     itself instead of waiting to be clicked. */
+  .job-filters {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+  }
+  .job-filter {
+    background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+    padding: 5px 11px; border-radius: 5px; font-size: 12px; font-weight: 500;
+    cursor: pointer; font-family: inherit;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .job-filter:hover { border-color: var(--text-dim); color: var(--text); background: var(--bg-hover); }
+  .job-filter.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .job-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Health reasons banner. Severity is carried by the left stripe rather than
+     a fill, so it reads as information rather than an alarm on every load. */
+  .health-reasons {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-left: 3px solid var(--text-dim);
+    border-radius: 8px; padding: 14px 18px; margin-bottom: 18px;
+  }
+  .health-reasons.warn { border-left-color: var(--yellow); }
+  .health-reasons.bad  { border-left-color: var(--red); }
+  .health-reasons.note { border-left-color: var(--text-dim); }
+  .health-reasons .hr-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-dim); margin-bottom: 7px;
+  }
+  .health-reasons ul { margin: 0; padding-left: 18px; }
+  .health-reasons li { font-size: 13.5px; line-height: 1.55; color: var(--text); margin-bottom: 3px; }
+  .health-reasons li:last-child { margin-bottom: 0; }
+
+  .job-filter .count {
+    background: var(--red); color: #fff; border-radius: 9px;
+    padding: 0 6px; font-size: 10px; font-weight: 700; line-height: 16px; min-width: 16px;
+  }
+  .job-filter.active .count { background: rgba(0,0,0,0.28); }
   .btn-ghost:hover { color: var(--text); background: var(--bg-hover); filter: none; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
@@ -367,6 +407,7 @@
 
       <!-- ═══ OVERVIEW PAGE ═══ -->
       <div class="page active" id="page-overview">
+        <div id="healthReasons" hidden></div>
         <div class="stat-grid" id="stats"></div>
 
         <div class="grid-2">
@@ -485,6 +526,12 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
               Refresh
             </button>
+          </div>
+          <div class="job-filters" id="jobFilters">
+            <button class="job-filter active" data-filter="" id="jobFilterAll">All</button>
+            <button class="job-filter" data-filter="failed,dead_letter" id="jobFilterProblem">Needs attention</button>
+            <button class="job-filter" data-filter="pending,queued,retry_scheduled" id="jobFilterWaiting">Waiting</button>
+            <button class="job-filter" data-filter="completed" id="jobFilterDone">Completed</button>
           </div>
           <div class="card-body flush">
             <table>
@@ -898,6 +945,9 @@ document.addEventListener('DOMContentLoaded', function() {
   // Printer type toggle
   document.getElementById('pType').addEventListener('change', toggleTypeFields);
   document.getElementById('pRole').addEventListener('change', syncRoleField);
+  document.querySelectorAll('.job-filter').forEach(btn => {
+    btn.addEventListener('click', () => setJobFilter(btn.dataset.filter, btn));
+  });
   // Once the operator edits the name themselves, stop suggesting one.
   document.getElementById('pName').addEventListener('input', (e) => {
     e.target.dataset.touched = '1';
@@ -937,6 +987,37 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // ── Health & Stats ──
+/**
+ * Show `health.reasons` at the top of Overview.
+ *
+ * These are already written as plain sentences meant for a person — "None of
+ * the 2 configured printer(s) are online", "1 job(s) have exhausted their
+ * retries and will never print". Until now they were reachable only through the
+ * API, so the dashboard showed an amber pill saying "Degraded" and left the
+ * operator to guess which of several things had gone wrong.
+ */
+function renderHealthReasons(d) {
+  const box = document.getElementById('healthReasons');
+  if (!box) return;
+
+  const reasons = Array.isArray(d.reasons) ? d.reasons : [];
+  if (reasons.length === 0) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+
+  // A dead-letter note is history, not a live fault, so it never reddens a
+  // service that is otherwise fine — matching how decideHealth itself treats it.
+  const tone = d.status === 'healthy' ? 'note' : d.status === 'degraded' ? 'warn' : 'bad';
+  box.className = 'health-reasons ' + tone;
+  box.innerHTML = `
+    <div class="hr-title">${d.status === 'healthy' ? 'Worth knowing' : 'Why the service is ' + esc(d.status)}</div>
+    <ul>${reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+  `;
+  box.hidden = false;
+}
+
 async function loadHealth() {
   try {
     const d = await api('GET', '/health');
@@ -950,6 +1031,7 @@ async function loadHealth() {
     txt.textContent = d.status.charAt(0).toUpperCase() + d.status.slice(1);
     document.getElementById('versionText').textContent = 'v' + d.version;
     document.getElementById('footerVersion').textContent = d.version;
+    renderHealthReasons(d);
     
     document.getElementById('stats').innerHTML = `
       <div class="stat-card">
@@ -1047,7 +1129,14 @@ async function loadSystemInfo() {
 function renderJobRows(jobs, showActions) {
   if (!jobs || jobs.length === 0) {
     const cols = showActions ? 6 : 5;
-    return `<tr><td colspan="${cols}"><div class="empty-state"><p>No recent jobs</p></div></td></tr>`;
+    // Say which list is empty. "No recent jobs" under a filter is misleading —
+    // it reads as "nothing has happened" when it means "nothing matched".
+    const msg = !showActions || !__jobFilter
+      ? 'No jobs yet'
+      : __jobFilter.startsWith('failed')
+        ? 'Nothing needs attention — no failed or abandoned jobs'
+        : 'No jobs with this status';
+    return `<tr><td colspan="${cols}"><div class="empty-state"><p>${msg}</p></div></td></tr>`;
   }
   return jobs.map(j => {
     const statusCls = j.status === 'completed' ? 'online' : j.status === 'failed' || j.status === 'dead_letter' ? 'offline' : 'error';
@@ -1073,12 +1162,46 @@ function renderJobRows(jobs, showActions) {
   }).join('');
 }
 
+// Which statuses the Jobs page is showing. Empty string means every status,
+// which is the default — a list filtered to pending is empty exactly when the
+// service is healthy, and hides the jobs that will never print.
+let __jobFilter = '';
+
 async function loadJobs() {
   try {
-    const d = await api('GET', '/api/jobs?limit=20');
+    const qs = __jobFilter ? `&status=${encodeURIComponent(__jobFilter)}` : '';
+    const d = await api('GET', `/api/jobs?limit=20${qs}`);
     document.getElementById('jobsTable').innerHTML = renderJobRows(d.jobs, true);
-    document.getElementById('overviewJobsTable').innerHTML = renderJobRows((d.jobs || []).slice(0, 5), false);
+
+    // The Overview strip always shows recent activity regardless of the tab
+    // selected on the Jobs page, so switching filters does not silently change
+    // a different page.
+    const recent = __jobFilter ? (await api('GET', '/api/jobs?limit=5')).jobs : d.jobs;
+    document.getElementById('overviewJobsTable').innerHTML = renderJobRows((recent || []).slice(0, 5), false);
+
+    await refreshProblemCount();
   } catch {}
+}
+
+/** Badge the "Needs attention" tab so a stuck job is visible without a click. */
+async function refreshProblemCount() {
+  const tab = document.getElementById('jobFilterProblem');
+  if (!tab) return;
+  try {
+    const d = await api('GET', '/api/jobs?limit=100&status=failed,dead_letter');
+    const n = (d.jobs || []).length;
+    tab.innerHTML = n > 0
+      ? `Needs attention <span class="count">${n > 99 ? '99+' : n}</span>`
+      : 'Needs attention';
+  } catch {
+    tab.textContent = 'Needs attention';
+  }
+}
+
+function setJobFilter(filter, btn) {
+  __jobFilter = filter;
+  document.querySelectorAll('.job-filter').forEach(b => b.classList.toggle('active', b === btn));
+  loadJobs();
 }
 
 async function retryJob(id) {

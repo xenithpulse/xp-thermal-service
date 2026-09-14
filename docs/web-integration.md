@@ -342,7 +342,7 @@ async function waitForJob(baseUrl, apiKey, jobId, { timeoutMs = 30000 } = {}) {
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/jobs` | `?status=`, `?printerId=`, `?limit=` (1-100, default 50). **With no filter it returns pending jobs only** ([server.ts:740](../src/api/server.ts#L740)). An unknown `status` gives `400 {"error":"Invalid status value"}` |
+| `GET` | `/api/jobs` | `?status=`, `?printerId=`, `?limit=` (1-100, default 50). With no filter it returns the most recent jobs of **every** status. `status` takes one value or a comma-separated list, e.g. `?status=failed,dead_letter`. An unknown value gives a `400` naming it and listing the valid ones |
 | `DELETE` | `/api/jobs/:jobId` | Cancel. **Only works before the job is terminal** — cancelling a `completed` / `dead_letter` / already-cancelled job returns `400 JOB_CANCELLED`, `"Cannot cancel job: <id>"` |
 | `POST` | `/api/jobs/:jobId/retry` | Re-queue a failed job |
 | `POST` | `/api/jobs/clear-failed` | Discard failed jobs. Returns `{"success":true,"message":"Cleared 3 failed jobs","count":3}` — and it does clear `dead_letter` jobs, not just `failed` ones |
@@ -571,7 +571,7 @@ Everything except `/health`, `/api/health`, `/`, `/dashboard` and `/api/auth/loc
 | `POST` | `/api/print/:printerId` | Queue to a specific role |
 | `GET` | `/api/jobs/:jobId/status` | Status + history (200 with `found:false` if unknown) |
 | `GET` | `/api/jobs/:jobId` | Job (404 if unknown) |
-| `GET` | `/api/jobs` | List; defaults to pending |
+| `GET` | `/api/jobs` | List; all statuses unless filtered |
 | `DELETE` | `/api/jobs/:jobId` | Cancel |
 | `POST` | `/api/jobs/:jobId/retry` | Retry |
 | `GET` | `/api/printers` | Printers + live state |

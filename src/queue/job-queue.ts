@@ -13,7 +13,9 @@ import {
   TemplateType,
   PrintRequest,
   QueueConfig,
-  ServiceEvent
+  ServiceEvent,
+  PrintServiceError,
+  ErrorCodes
 } from '../types';
 import { Logger } from '../utils/logger';
 
@@ -83,6 +85,43 @@ export class JobQueue extends EventEmitter {
    * Enqueue a job from a print request
    */
   enqueue(request: PrintRequest, printerId: string): { created: boolean; job: PrintJob } {
+    /*
+     * Refuse work once the backlog is implausible.
+     *
+     * ErrorCodes.QUEUE_FULL existed from the start and was never thrown, so the
+     * queue had no ceiling at all: a printer switched off overnight while the
+     * POS kept sending grew the job store without limit and without complaint.
+     * The failure is silent on both sides — the POS believes every receipt was
+     * accepted, and the only visible symptom is disk.
+     *
+     * The ceiling counts UNFINISHED work only. Completed and dead-lettered jobs
+     * are history and are bounded separately by the cleanup sweep; counting
+     * them would make a busy-but-healthy till start refusing receipts, which is
+     * the opposite of the point.
+     *
+     * A duplicate idempotency key is deliberately NOT blocked — a retry of a
+     * receipt already accepted must keep returning that same job, or the POS's
+     * retry turns into a lost ticket exactly when the queue is in trouble.
+     */
+    const limit = this.config.maxQueueDepth;
+    if (limit > 0 && !this.store.getByIdempotencyKey(request.idempotencyKey)) {
+      // countUnfinished(), not getStats(): getStats().pending counts the exact
+      // status 'pending' and misses 'queued', 'printing' and 'retry_scheduled'.
+      // A printer that is switched off parks its backlog in retry_scheduled, so
+      // a ceiling built on getStats() reads zero precisely when it should trip.
+      const unfinished = this.store.countUnfinished();
+      if (unfinished >= limit) {
+        throw new PrintServiceError(
+          `The print queue is full (${unfinished} jobs waiting, limit ${limit}). ` +
+            `The printer has not accepted work for some time — check that it is ` +
+            `powered on and connected, then retry. Raise queue.maxQueueDepth in ` +
+            `config.json if this site genuinely queues more than ${limit} jobs.`,
+          ErrorCodes.QUEUE_FULL,
+          503
+        );
+      }
+    }
+
     return this.createJob({
       idempotencyKey: request.idempotencyKey,
       printerId: printerId,
@@ -231,6 +270,13 @@ export class JobQueue extends EventEmitter {
    */
   getJobsByStatus(status: JobStatus, limit = 100): PrintJob[] {
     return this.store.getByStatus(status, limit);
+  }
+
+  /**
+   * Most recent jobs, whatever their status.
+   */
+  getRecentJobs(limit = 100): PrintJob[] {
+    return this.store.getRecent(limit);
   }
 
   /**

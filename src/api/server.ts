@@ -32,6 +32,7 @@ import {
   TemplateType,
   JobPriority,
   JobStatus,
+  PrintJob,
   SecurityConfig,
   PrintServiceError,
   ErrorCodes
@@ -720,24 +721,54 @@ export class ApiServer {
 
   private handleListJobs(req: Request, res: Response): void {
     try {
-      const status = req.query.status as string | undefined;
+      const statusParam = req.query.status as string | undefined;
       const printerId = req.query.printerId as string | undefined;
       const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 50, 100));
 
-      // Validate status against known values
+      /*
+       * An unfiltered query returns the most recent jobs of EVERY status.
+       *
+       * It used to return pending only — a list that is empty precisely when
+       * the service is healthy, and which omits the failed and dead-lettered
+       * jobs that are the only rows worth looking at. The dashboard asked this
+       * way, so a site whose /health said "1 job has exhausted its retries" saw
+       * "No recent jobs" on the Jobs page and had nowhere to go.
+       *
+       * `status` accepts one value or a comma-separated list, so the UI can ask
+       * for "failed,dead_letter" in a single request.
+       */
       const validStatuses: string[] = Object.values(JobStatus);
-      if (status && !validStatuses.includes(status)) {
-        res.status(400).json({ error: 'Invalid status value' });
+      const requested = statusParam
+        ? statusParam.split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+
+      const unknown = requested.filter((s) => !validStatuses.includes(s));
+      if (unknown.length > 0) {
+        res.status(400).json({
+          error: 'INVALID_REQUEST',
+          message:
+            `Unknown job status: ${unknown.map((s) => `"${s}"`).join(', ')}. ` +
+            `Valid values are: ${validStatuses.join(', ')}.`
+        });
         return;
       }
 
-      let jobs;
-      if (status) {
-        jobs = this.queue.getJobsByStatus(status as JobStatus, limit);
+      let jobs: PrintJob[];
+      if (requested.length === 1) {
+        jobs = this.queue.getJobsByStatus(requested[0] as JobStatus, limit);
+      } else if (requested.length > 1) {
+        // Ask for a full page per status, merge, then trim — a status with no
+        // jobs must not eat another status's share of the limit.
+        const seen = new Set<string>();
+        jobs = requested
+          .flatMap((s) => this.queue.getJobsByStatus(s as JobStatus, limit))
+          .filter((job) => (seen.has(job.id) ? false : seen.add(job.id) && true))
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, limit);
       } else if (printerId) {
         jobs = this.queue.getJobsByPrinter(printerId, limit);
       } else {
-        jobs = this.queue.getJobsByStatus(JobStatus.PENDING, limit);
+        jobs = this.queue.getRecentJobs(limit);
       }
 
       res.json({ jobs, total: jobs.length });

@@ -563,6 +563,13 @@ export interface SecurityConfig {
 
 export interface QueueConfig {
   maxConcurrentJobs: number;
+  /**
+   * Most unfinished jobs the queue will hold before refusing new work with
+   * QUEUE_FULL. Counts pending and processing only — completed and
+   * dead-lettered jobs are history, bounded by the cleanup sweep. 0 disables
+   * the ceiling and restores the old unbounded behaviour.
+   */
+  maxQueueDepth: number;
   maxRetries: number;
   retryDelayMs: number;
   retryBackoffMultiplier: number;

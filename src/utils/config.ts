@@ -202,6 +202,15 @@ const QueueConfigSchema = z.object({
    * and only then are jobs abandoned. The reverse ordering — jobs dying before
    * anything reports a problem — is how receipts go missing silently.
    */
+  /*
+   * A ceiling on unfinished work. 2000 receipts is far past any real backlog —
+   * a busy site clears a lunch rush in dozens, not thousands — so this only
+   * trips when nothing has printed for a long time, which is exactly when the
+   * POS should be told rather than allowed to keep filling the disk.
+   *
+   * 0 disables it, for a site that would rather queue forever than refuse.
+   */
+  maxQueueDepth: z.number().min(0).default(2000),
   maxRetries: z.number().min(0).default(DEFAULT_MAX_RETRIES),
   retryDelayMs: z.number().min(100).default(1000),
   retryBackoffMultiplier: z.number().min(1).default(2),

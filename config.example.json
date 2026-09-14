@@ -24,6 +24,7 @@
   },
   "queue": {
     "maxConcurrentJobs": 3,
+    "maxQueueDepth": 2000,
     "maxRetries": 10,
     "retryDelayMs": 1000,
     "retryBackoffMultiplier": 2,

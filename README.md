@@ -84,7 +84,7 @@ Physical problems are deliberately **not** auto-healed. Out of paper gets an ins
 ### Everything else
 
 - USB and network printers, ESC/POS with barcodes, QR codes and formatting
-- Templates: receipt, KOT, invoice, label, test, raw
+- Templates: receipt, KOT, invoice, test, raw
 - Cash drawer: pin 2/5, configurable pulse, open-on-print, test pulse before saving
 - Priority queue, idempotency keys, retry with exponential backoff
 - Automatic port fallback (9100–9109) with published endpoint descriptors
@@ -404,8 +404,11 @@ A rejected origin gets a 403 that says exactly how to allow it, rather than an o
 | `kot` | Kitchen ticket with large text, modifiers, special instructions |
 | `invoice` | Detailed invoice with customer info and line items |
 | `test` | Font samples, alignment tests, optional barcode/QR |
-| `label` | Label printing |
 | `raw` | Direct ESC/POS (hex, base64, or raw bytes) |
+
+These five are the whole set — `templateType` is validated against them and anything else is a 400.
+
+Note that the **`label` role** is a different thing from a template: a role configures a printer (id, paper width, capabilities), a template renders content. A printer in the `label` role prints whichever of the five templates you send it, most often `raw`.
 
 ---
 
@@ -576,7 +579,7 @@ C:\ProgramData\XPThermalService\daemon\*.log
 │  Job Queue (sql.js) - priority, idempotency, backoff retry     │
 │  flushed on every exit path so accepted jobs are never lost    │
 ├──────────────────────────────────────────────────────────────┤
-│  Template Engine - receipt · KOT · invoice · label · raw       │
+│  Template Engine - receipt · KOT · invoice · test · raw       │
 ├──────────────────────────────────────────────────────────────┤
 │  Printer Manager                                              │
 │   ├── Device Watcher   WMI events -> ~1s reaction              │

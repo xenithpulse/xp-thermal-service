@@ -2,51 +2,60 @@
 
 Audience: whoever picks this up next.
 
-State at handover: 145 tests passing, v1.0.0, commit `f3f7afd`. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
+State: 152 tests passing, v1.0.0. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
 
-Ordered by consequence. **Phase 1 is the only phase that is urgent** — it is where the service already knows something is wrong and does not say so.
+Ordered by consequence. **Phase 1 is done.** Phase 2 is next and is the active use case; Phase 3 is real but not urgent.
 
 ---
 
-## Phase 1 — Stop losing things quietly
+## Phase 1 — Stop losing things quietly ✅ Done
 
 No new capability. Surfaces what the service already knows.
 
-### 1.1 The Jobs page hides failed and dead-lettered jobs — *verified defect*
+**Shipped.** Kept below as the record of what was wrong and why, since the reasoning outlives the fix. One item (1.2) turned out not to be a defect at all — see its note.
+
+### 1.1 The Jobs page hides failed and dead-lettered jobs — *verified defect* — **fixed**
 
 The dashboard requests `/api/jobs?limit=20` with no status filter, and the server defaults an unfiltered query to **pending only** ([server.ts:740](../src/api/server.ts#L740), [dashboard.html:1078](../public/dashboard.html#L1078)).
 
 On a healthy till the pending list is permanently empty, so the page reads "No recent jobs" while `/health` reports jobs that will never print. A site hit exactly this: health said *"1 job(s) have exhausted their retries"* and the Jobs page showed nothing.
 
-**Fix:** status tabs on the Jobs page, defaulting to all statuses rather than pending. A job that will never print is the most important row the dashboard can show and is currently the one row it hides.
+**Done.** An unfiltered `/api/jobs` now returns the most recent jobs of every status, `status` accepts a comma-separated list, and the Jobs page has tabs — All / Needs attention / Waiting / Completed — with a count badge on *Needs attention* so a stuck job advertises itself. Empty states name which list is empty rather than claiming nothing has happened.
 
-### 1.2 No way to retry a dead-lettered job from the UI — *verified gap*
+Verified live against the old behaviour: with three jobs parked retrying, `status=pending` returned 0 while unfiltered returned 3.
 
-`POST /api/jobs/:jobId/retry` exists and nothing in the dashboard calls it. An operator whose printer was merely switched off must lose the ticket or use curl.
+### 1.2 No way to retry a dead-lettered job from the UI — **was not a defect**
 
-**Fix:** a Retry button on failed and dead-letter rows. Depends on 1.1 being done first, since those rows are not currently visible.
+I was wrong about this in the first draft. The Retry button already exists in `renderJobRows` and `retryJob()` already calls `POST /api/jobs/:jobId/retry`. It was never reachable only because those rows never rendered — so 1.1 fixed it, and there was nothing else to build.
 
-### 1.3 The README documents a `label` template that does not exist — *verified defect*
+### 1.3 The README documents a `label` template that does not exist — *verified defect* — **fixed**
 
 `TemplateType` has five values — `receipt`, `kot`, `invoice`, `test`, `raw` ([types/index.ts:154](../src/types/index.ts#L154)) — and the engine registers five renderers ([templates/engine.ts:37-41](../src/templates/engine.ts#L37-L41)). The README's feature list claims six, including `label`.
 
 A POS sending `templateType: "label"` gets a 400 from schema validation. The **role** called Labels is unrelated: it configures a printer, it does not render anything.
 
-**Fix:** implement a label renderer, or strike the claim from the README. Either is fine; shipping a documented template that returns 400 is not — an integrator finds out in production.
+**Done.** Struck the claim rather than implementing a renderer — a label template with no agreed payload contract would just be a second false promise. The README now states the five types are the whole set, and explains that the `label` *role* is a different concept from a template.
 
-### 1.4 The queue has no ceiling — *verified gap*
+Implementing a real label renderer remains open as a feature, not a defect.
+
+### 1.4 The queue has no ceiling — *verified gap* — **fixed**
 
 `QUEUE_FULL` is defined in the error codes ([types/index.ts:729](../src/types/index.ts#L729)) and is **never thrown anywhere**. A printer offline for an hour while the POS keeps sending grows the job store without limit and without complaint.
 
-**Fix:** a configurable ceiling that rejects with `QUEUE_FULL` and a 503, so the POS learns to stop rather than discovering the problem via disk usage.
+**Done.** `queue.maxQueueDepth` (default 2000, `0` disables) rejects new work with `QUEUE_FULL` and a 503 naming the limit. Two deliberate exclusions:
 
-### 1.5 Surface `health.reasons` on the Overview page — *proposed*
+- **A duplicate idempotency key is never blocked.** A POS retrying a receipt it already submitted must keep getting that job back; if a full queue turned retries into errors it would destroy exactly the tickets idempotency exists to protect, at the worst moment.
+- **Only unfinished work counts.** Completed and dead-lettered jobs are history, bounded by the cleanup sweep. Counting them would make a busy healthy till refuse receipts after N ever.
 
-The reasons array is already written as plain sentences meant for a person to read. It is currently reachable only through the API.
+Worth knowing for anything similar: the first version used `getStats()`, whose `pending` counts the exact status `pending` and misses `queued`, `printing` and `retry_scheduled`. A switched-off printer parks its whole backlog in `retry_scheduled`, so the ceiling read zero precisely when it should trip. The unit tests passed because their jobs were all `pending`; only the live check caught it. There is now a `countUnfinished()` on the store and a regression test.
+
+### 1.5 Surface `health.reasons` on the Overview page — *proposed* — **done**
+
+The reasons array is already written as plain sentences meant for a person to read. It now appears at the top of Overview, with the severity carried by a left stripe rather than a fill. A dead-letter note on an otherwise healthy service reads as "Worth knowing" rather than an alarm, matching how `decideHealth` itself treats it.
 
 ---
 
-## Phase 2 — Network printers as first-class
+## Phase 2 — Network printers as first-class ← next
 
 The active use case, and the gap between the two transports is wide: USB has ranked discovery, role-based setup, corroborated status and a repair ladder. LAN has none of it.
 

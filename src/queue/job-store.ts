@@ -463,6 +463,30 @@ export class JobStore {
   }
 
   /**
+   * Most recent jobs, whatever their status.
+   *
+   * The obvious query, and the one that did not exist. Every caller wanting
+   * "show me what has been happening" had to pick a single status, so the
+   * dashboard asked for pending — a list that is empty exactly when the service
+   * is working, and which hides the failed and dead-lettered jobs that are the
+   * only rows anyone actually needs to see.
+   */
+  getRecent(limit = 100): PrintJob[] {
+    if (!this.db) return [];
+
+    return this.safeDbOp(() => {
+      const result = this.db!.exec(`
+        SELECT * FROM jobs
+        ORDER BY created_at DESC
+        LIMIT ?
+      `, [limit]);
+
+      if (result.length === 0) return [];
+      return result[0].values.map(row => this.rowToJob(result[0].columns, row));
+    });
+  }
+
+  /**
    * Get jobs by printer
    */
   getByPrinter(printerId: string, limit = 100): PrintJob[] {
@@ -496,6 +520,29 @@ export class JobStore {
   /**
    * Get job counts by status
    */
+  /**
+   * Work the queue still owes: everything not finished and not abandoned.
+   *
+   * getCounts() cannot answer this — it counts `status = 'pending'` and
+   * `status = 'processing'` exactly, so a job sitting in `queued`, `printing`
+   * or `retry_scheduled` is invisible to it. That is most of a real backlog:
+   * a printer that is switched off leaves jobs in `retry_scheduled`, so a
+   * ceiling built on getCounts() reads zero at the exact moment the queue is
+   * filling up, which is the only moment it matters.
+   */
+  countUnfinished(): number {
+    if (!this.db) return 0;
+
+    return this.safeDbOp(() => {
+      const result = this.db!.exec(`
+        SELECT COUNT(*) FROM jobs
+        WHERE status IN ('pending', 'queued', 'processing', 'printing', 'retry_scheduled')
+      `);
+      if (result.length === 0) return 0;
+      return (result[0].values[0][0] as number) || 0;
+    });
+  }
+
   getCounts(): {
     total: number;
     pending: number;
