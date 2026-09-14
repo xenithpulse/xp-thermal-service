@@ -531,6 +531,22 @@ export interface ServiceConfig {
   logging: LoggingConfig;
   printers: PrinterConfig[];
   backup: BackupConfig;
+  alerts: AlertsConfig;
+}
+
+/**
+ * Outbound notification when the service stops being able to print.
+ * Off by default — alerting nobody configured is alerting nobody asked for.
+ */
+export interface AlertsConfig {
+  enabled: boolean;
+  /** POST target, usually the POS backend. */
+  webhookUrl: string;
+  pollIntervalMs: number;
+  /** Consecutive samples a new status must hold before it is believed. */
+  confirmSamples: number;
+  /** Minimum gap between non-recovery alerts. Recoveries always send. */
+  minIntervalMs: number;
 }
 
 export interface ServerConfig {

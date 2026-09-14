@@ -32,6 +32,11 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
   private reconnecting = false;
   private connectionPromise: Promise<void> | null = null;
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private readonly idleReleaseMs: number;
+  /** When a real print job last used this socket. Health checks do not count. */
+  private lastJobAt = Date.now();
+  /** True when we hung up on purpose, so `close` is not treated as a fault. */
+  private releasedForIdle = false;
 
   constructor(config: PrinterConfig) {
     super(config);
@@ -56,6 +61,18 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
 
     this.host = config.host!;
     this.port = config.port!;
+
+    /*
+     * How long an idle connection is held before it is released so another
+     * station can print. See the socket 'timeout' handler.
+     *
+     * 60 seconds by default: long enough that a busy till never pays the
+     * reconnect cost between tickets, short enough that a second station
+     * waiting to print is not blocked for long. `0` holds the connection
+     * indefinitely, for a printer this machine genuinely owns alone.
+     */
+    const configured = Number((config.metadata as Record<string, unknown> | undefined)?.idleReleaseMs);
+    this.idleReleaseMs = Number.isFinite(configured) && configured >= 0 ? configured : 60000;
   }
 
   async connect(): Promise<void> {
@@ -163,6 +180,13 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
     });
 
     this.socket.on('close', () => {
+      if (this.releasedForIdle) {
+        // We hung up on purpose. Not a fault, and must not trigger the
+        // reconnect ladder — that would immediately retake the connection slot
+        // we just gave away.
+        this.socket = null;
+        return;
+      }
       if (!this.reconnecting) {
         this.handleDisconnect();
       }
@@ -173,8 +197,61 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
       this.emit('error', new Error('Socket timeout'));
     });
 
-    // Set socket timeout for idle connections
-    this.socket.setTimeout(60000); // 60 seconds idle timeout
+    // Detects a peer that has gone away without closing. Idle *release* is
+    // handled on the health-check tick instead — see maybeReleaseIdle for why
+    // this timer cannot do that job.
+    this.socket.setTimeout(120000);
+  }
+
+  /** True while a write is in flight or queued behind one. */
+  private isBusy(): boolean {
+    return this.isWriting || this.writeQueue.length > 0;
+  }
+
+  /**
+   * Let go of an idle printer so another station can use it.
+   *
+   * Almost every network thermal printer accepts exactly ONE TCP connection at
+   * a time. This adapter holds a persistent socket, so while it is connected no
+   * other machine can print — and two tills sharing a kitchen printer is an
+   * ordinary deployment. The second till gets ECONNRESET all evening, and the
+   * reason is us.
+   *
+   * This deliberately does NOT use `socket.setTimeout`, which is what the first
+   * attempt did. That timer counts *all* socket traffic, and the health check
+   * writes a status request every 30 seconds — so the socket was never idle by
+   * its reckoning and the release could never fire. Idleness has to be measured
+   * against real print activity, which is what `lastJobAt` tracks.
+   *
+   * Cost is one reconnect on the next ticket, a few milliseconds on a LAN.
+   */
+  private maybeReleaseIdle(): boolean {
+    if (this.idleReleaseMs <= 0) return false;
+    if (this.isBusy()) return false;
+    if (!this.socket || this.socket.destroyed) return false;
+    if (Date.now() - this.lastJobAt < this.idleReleaseMs) return false;
+
+    this.releasedForIdle = true;
+    this.stopHealthCheck();
+
+    /*
+     * Status stays ONLINE. The printer is not faulty — we spoke to it
+     * successfully and chose to hang up. Reporting OFFLINE here would make
+     * /health call the service degraded, and with alerting enabled it would
+     * page someone every time a quiet printer released its socket.
+     */
+    this.updateState({
+      isConnected: false,
+      status: PrinterStatus.ONLINE,
+      reason:
+        `Idle. The connection to ${this.host}:${this.port} was released so another ` +
+        `station can use this printer; it reconnects automatically on the next job.`
+    });
+
+    // end(), not destroy(): some units hold the connection slot until their own
+    // timeout expires unless they see a clean close.
+    this.socket.end();
+    return true;
   }
 
   async disconnect(): Promise<void> {
@@ -238,10 +315,17 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
     const startTime = Date.now();
 
     try {
-      // Ensure we're connected
+      // Ensure we're connected. After an idle release this is the reconnect,
+      // so clear the flag first or the fresh socket's close handler would still
+      // treat a genuine drop as deliberate.
       if (!this.socket || this.socket.destroyed) {
+        this.releasedForIdle = false;
         await this.connect();
       }
+
+      // Real print activity, which is what idleness is measured against —
+      // health-check traffic deliberately does not count.
+      this.lastJobAt = Date.now();
 
       const bytesWritten = await this.writeToSocket(item.data);
       const duration = Date.now() - startTime;
@@ -249,6 +333,7 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
       this._state.totalJobsPrinted++;
       this._state.lastSeen = Date.now();
       this._state.consecutiveFailures = 0;
+      this.lastJobAt = Date.now();
 
       item.resolve({
         success: true,
@@ -486,6 +571,11 @@ export class NetworkPrinterAdapter extends BasePrinterAdapter {
     this.healthCheckInterval = setInterval(async () => {
       if (!this.socket || this.socket.destroyed) {
         this.handleDisconnect();
+        return;
+      }
+
+      // Hand the printer back before spending another status request on it.
+      if (this.maybeReleaseIdle()) {
         return;
       }
 

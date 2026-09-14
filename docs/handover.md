@@ -2,9 +2,9 @@
 
 Audience: whoever picks this up next.
 
-State: 152 tests passing, v1.0.0. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
+State: 186 tests passing, v1.0.0. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
 
-Ordered by consequence. **Phase 1 is done.** Phase 2 is next and is the active use case; Phase 3 is real but not urgent.
+Ordered by consequence. **Phases 1, 2 and 3 are done.** What remains is listed under [Still open](#still-open).
 
 ---
 
@@ -55,44 +55,92 @@ The reasons array is already written as plain sentences meant for a person to re
 
 ---
 
-## Phase 2 — Network printers as first-class ← next
+## Phase 2 — Network printers as first-class ✅ Done
 
 The active use case, and the gap between the two transports is wide: USB has ranked discovery, role-based setup, corroborated status and a repair ladder. LAN has none of it.
 
 Recent work fixed the worst of it — a host-less network printer no longer takes the service down, failures now produce a cause and a fix instead of an errno, and addresses are validated before a socket opens. What remains:
 
-### 2.1 Role-based setup cannot create a network printer — *verified gap*
+### 2.1 Role-based setup cannot create a network printer — *verified gap* — **fixed**
 
 `buildRoleConfig` hard-codes `type: PrinterType.USB` ([printer-roles.ts:155](../src/printers/printer-roles.ts#L155)), so the guided flow is USB-only and LAN users fall back to the manual form.
 
-**Fix:** take a transport argument, so a LAN kitchen printer gets the same derived id, width and capability profile as a USB one.
+**Done.** `buildNetworkRoleConfig` builds the same role config over TCP, and `/api/printers/setup` takes either `windowsName` or `host`+`port` (and refuses both at once). Two things a network printer cannot derive the way USB does get honest defaults rather than guesses dressed up as detection: paper width (48, overridable) and identity, where the address *is* the identity.
 
-### 2.2 Test connection before saving — *proposed*
+Verified live: posting `{role:"kitchen", host, port}` yields `id=kitchen`, `type=network`, the KOT capability profile, drawer off, and an honest "not ready" with the reason.
+
+### 2.2 Test connection before saving — *proposed* — **done**
 
 A button that opens a socket to the entered address and reports the result through `network-diagnosis`, which already produces the right sentence for every failure. Turns a five-minute guess-and-check into one click.
 
 Highest-value single addition for a first-time LAN install.
 
-### 2.3 Network status is not corroborated — *verified gap*
+**Done.** `POST /api/printers/test-connection`, with a **Test connection** button in the printer form. It deliberately prints nothing — a test that emits paper cannot be run casually at a till during service — and it says plainly that an open socket proves something is *listening*, not that it speaks ESC/POS.
+
+### 2.3 Network status is not corroborated — *verified gap* — **fixed**
 
 `NetworkPrinterAdapter.getStatus()` returns a value without writing it to state, so the reconcile loop reads a status the adapter never recorded. It also treats a silent socket as online.
 
 USB has an entire verdict module for this problem ([printer-resolver.ts](../src/printers/printer-resolver.ts)). The network path should reuse that thinking, including real `DLE EOT` parsing for paper-out and cover-open.
 
+**Done, and it was worse than described.** Beyond never writing state, the adapter sent `DLE EOT 1` and then read bit 3 as paper-out and bit 2 as cover-open. Under `n=1` those bits are **offline** and **the cash drawer pin** — so a printer that was merely switched off reported itself out of paper, sending someone to change a roll that was already full.
+
+New [escpos-status.ts](../src/printers/escpos-status.ts) carries the bit tables for `n=1/2/4` as pure functions, validates the four fixed bits every status byte has (so bytes from something that is not a printer are not read as status), and only asks *why* a printer is offline when it says it is. A printer that does not answer `DLE EOT` at all stays online and says so — plenty of cheap units never implement it over a raw socket, and calling those faulty would take working printers offline.
+
 ---
 
-## Phase 3 — Deferred
+## Phase 3 — Resilience and reach ✅ Done
 
-Real, but none of it is urgent. Listed so it is not rediscovered from scratch.
+Three of the six deferred items were built. The rest are under [Still open](#still-open) with the reason they were left.
 
-| Item | Why it is deferred |
+### 3.1 Subnet discovery — **done**
+
+`GET /api/printers/discover-network` sweeps this machine's own /24-or-smaller subnets for an open 9100, with a **Scan network** button in Find Printers. A discovered address fills straight into the Add Printer form.
+
+An open port is not a printer — print servers, terminal servers and unrelated software sit on 9100 too — so each candidate is asked `DLE EOT 1` and the reply is checked for the fixed bits. Confirmed printers sort first; a silent device is still listed but labelled honestly rather than presented as a printer.
+
+Bounded three ways (concurrency, per-host timeout, overall budget) because the dashboard waits on the request, and it returns a partial list rather than nothing if the budget runs out. Measured on a real LAN: **506 addresses in 3.3 s**.
+
+Only /24-or-smaller subnets are swept. A /16 is 65k probes and nobody's till is on one; a /20 (Hyper-V's default switch) is 4094 and is not where the printer is either.
+
+### 3.2 Let go of an idle printer — **done**
+
+Almost every network thermal printer accepts exactly **one** TCP connection at a time. The adapter held a persistent socket, so while it was connected no other machine could print — and two tills sharing a kitchen printer is an ordinary deployment. The second till got `ECONNRESET` all evening and the reason was us.
+
+An idle connection is now released after 60 s of no print activity (`metadata.idleReleaseMs`; `0` holds it indefinitely), and reconnects on demand. Cost is one reconnect per ticket after a quiet spell — a few milliseconds on a LAN.
+
+Two things that matter and were nearly got wrong:
+
+- **It cannot use `socket.setTimeout`.** That timer counts *all* socket traffic, and the health check writes a status request every 30 s — so the socket was never idle by its reckoning and the release could never have fired. Idleness is measured against real print activity instead.
+- **A released printer stays `ONLINE`.** It is not faulty; we spoke to it and chose to hang up. Reporting `OFFLINE` would make `/health` call the service degraded and, with 3.3 enabled, page someone every time a quiet printer let go of its socket.
+
+### 3.3 Degraded-state alerting — **done**
+
+`alerts` in config.json (off by default) POSTs to a webhook when health changes. It reads exactly the inputs `/health` reads and runs them through the same `decideHealth`, so an alert and the API can never disagree.
+
+The hard part is not sending a webhook, it is not sending thousands — a printer at the edge of its Wi-Fi range flaps all evening, and an alerter that fires on every change becomes noise people mute, which is indistinguishable from no alerting at all. So: a new status must hold for N consecutive samples before it is believed, at most one alert per window, and **a recovery always sends** and is never rate-limited away.
+
+Verified live end to end, both directions:
+
+```json
+{"status":"degraded","previousStatus":"healthy","recovered":false,
+ "reasons":["None of the 1 configured printer(s) are online (0 in error, 1 offline)."]}
+{"status":"healthy","previousStatus":"degraded","recovered":true, ...}
+```
+
+Reasons are passed through verbatim — an alert that paraphrased them would drift from what the dashboard shows for the same fault.
+
+---
+
+<a id="still-open"></a>
+## Still open
+
+| Item | Why it was left |
 |---|---|
-| Subnet discovery for LAN printers (sweep /24 for open 9100) | 2.2 removes most of the pain; discovery is convenience on top |
-| Single-connection guard — most network thermal printers accept one TCP connection, so two tills on one kitchen printer produce `ECONNRESET` | Diagnosed clearly already; only bites multi-till sites |
-| Degraded-state alerting (webhook or POS callback on status transition) | Health is well designed and nobody watches it — but Phase 1 makes it visible in the UI first |
-| Multi-printer soak across mixed transports | Concurrency is correctly gated; existing soak history is single-printer |
-| First-run setup wizard | All the pieces exist as separate screens; this only orders them |
-| In-place updates — the deployed copy does not self-update | Tolerable at five sites; blocking at fifty |
+| Multi-printer soak across mixed transports | Concurrency is correctly gated and the pieces are now testable in isolation; this needs a rig and real hardware more than it needs code |
+| First-run setup wizard | Every piece exists as a separate screen; this only orders them. Worth doing, but it is polish on a service that now works |
+| In-place updates — the deployed copy does not self-update | Tolerable at five sites; blocking at fifty. The largest remaining item by far, and the one most likely to need a design rather than a patch |
+| A real `label` template renderer | Removed from the README as a false claim rather than invented. Needs an agreed payload contract before it is worth building |
 
 ### One decision, not a task
 

@@ -504,6 +504,19 @@
           <div class="modal-body">
             <div id="discoverSystem" style="font-size:12px;color:var(--text-dim);margin-bottom:14px"></div>
             <div id="discoverList"><div class="empty-state"><p>Searching…</p></div></div>
+
+            <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:16px">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                  <div style="font-weight:600;font-size:13px">Printers on the network</div>
+                  <div style="font-size:11px;color:var(--text-dim);margin-top:2px">
+                    Sweeps this PC's local network for printers listening on port 9100.
+                  </div>
+                </div>
+                <button class="btn btn-outline btn-sm" id="btnScanNetwork">Scan network</button>
+              </div>
+              <div id="networkScanResult" style="margin-top:12px"></div>
+            </div>
           </div>
           <div class="modal-footer">
             <button class="btn btn-outline" data-action="closeDiscover">Close</button>
@@ -965,6 +978,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('pType').addEventListener('change', toggleTypeFields);
   document.getElementById('pRole').addEventListener('change', syncRoleField);
   document.getElementById('btnTestConn').addEventListener('click', testConnection);
+  document.getElementById('btnScanNetwork').addEventListener('click', scanNetworkForPrinters);
   // A changed address invalidates the previous result; leaving it on screen
   // would show a green tick for an address nobody tested.
   ['pHost', 'pPort'].forEach(id => {
@@ -1421,6 +1435,69 @@ function renderPrinters(printers) {
     // Detail cards
     renderPrinterDetailCards(printers);
   } catch {}
+}
+
+/**
+ * Sweep the LAN for printers.
+ *
+ * USB discovery has always been ranked and explanatory; LAN setup asked for an
+ * IP address the operator usually had to fetch by printing a self-test page.
+ *
+ * Devices that answered an ESC/POS status request are marked as confirmed
+ * printers and sorted first. A device that stayed silent is still listed —
+ * plenty of cheap units never answer — but it is labelled honestly rather than
+ * presented as a confirmed printer.
+ */
+async function scanNetworkForPrinters() {
+  const box = document.getElementById('networkScanResult');
+  const btn = document.getElementById('btnScanNetwork');
+
+  btn.disabled = true;
+  box.innerHTML = '<div style="font-size:12px;color:var(--text-dim)">Scanning the local network… this takes a few seconds.</div>';
+
+  try {
+    const d = await api('GET', '/api/printers/discover-network');
+    const list = d.printers || [];
+
+    if (list.length === 0) {
+      box.innerHTML = `<div style="font-size:12px;color:var(--text-dim)">${esc(d.message || 'Nothing found.')}</div>`;
+      return;
+    }
+
+    box.innerHTML = `
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">${esc(d.message)}</div>
+      <table><tbody>${list.map(p => `
+        <tr>
+          <td style="font-family:'SF Mono',Monaco,monospace;font-size:12px">${esc(p.host)}:${esc(p.port)}</td>
+          <td>
+            <span class="badge ${p.respondsToEscPos ? 'online' : 'error'}">
+              ${p.respondsToEscPos ? 'Printer' : 'Unconfirmed'}
+            </span>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:3px;max-width:380px">${esc(p.note)}</div>
+          </td>
+          <td class="actions">
+            <button class="btn btn-outline btn-sm" onclick="useNetworkPrinter('${esc(p.host)}',${Number(p.port)})">Use this</button>
+          </td>
+        </tr>`).join('')}</tbody></table>
+    `;
+  } catch (e) {
+    box.innerHTML = `<div style="font-size:12px;color:var(--red)">Scan failed: ${esc((e && e.message) || 'unknown error')}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Carry a discovered address into the Add Printer form, pre-filled. */
+function useNetworkPrinter(host, port) {
+  closeDiscover();
+  openAddPrinter();
+  document.getElementById('pType').value = 'network';
+  toggleTypeFields();
+  document.getElementById('pHost').value = host;
+  document.getElementById('pPort').value = port;
+  document.getElementById('pRole').value = 'kitchen';
+  syncRoleField();
+  toast('Address filled in — pick the role and save');
 }
 
 // ── Find Printers ──

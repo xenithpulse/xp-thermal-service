@@ -253,6 +253,24 @@ const BackupConfigSchema = z.object({
   }).default({})
 });
 
+/**
+ * Telling someone when the service stops being able to print.
+ *
+ * Off by default. Alerting that nobody configured is alerting nobody asked
+ * for, and a webhook firing at an unset URL is just noise in the log.
+ */
+const AlertsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** POST target. The POS backend is the usual recipient. */
+  webhookUrl: z.string().default(''),
+  /** How often health is evaluated. */
+  pollIntervalMs: z.number().min(5000).default(60000),
+  /** Consecutive samples a new status must hold before it is believed. */
+  confirmSamples: z.number().min(1).max(10).default(2),
+  /** Minimum gap between non-recovery alerts. Recoveries always send. */
+  minIntervalMs: z.number().min(0).default(900000)
+});
+
 const ServiceConfigSchema = z.object({
   server: ServerConfigSchema.default({}),
   security: SecurityConfigSchema.default({}),
@@ -262,7 +280,8 @@ const ServiceConfigSchema = z.object({
   // cannot produce a working adapter is surfaced as misconfigured at runtime,
   // never by invalidating the whole file.
   printers: z.array(PrinterConfigBaseSchema).default([]),
-  backup: BackupConfigSchema.default({})
+  backup: BackupConfigSchema.default({}),
+  alerts: AlertsConfigSchema.default({})
 });
 
 export class ConfigManager {
@@ -513,6 +532,10 @@ export class ConfigManager {
   /**
    * Get backup configuration
    */
+  getAlertsConfig() {
+    return this.config.alerts;
+  }
+
   getBackupConfig() {
     return this.config.backup;
   }

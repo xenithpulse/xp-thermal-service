@@ -39,6 +39,13 @@
     "file": "./logs/service.log",
     "console": true
   },
+  "alerts": {
+    "enabled": false,
+    "webhookUrl": "",
+    "pollIntervalMs": 60000,
+    "confirmSamples": 2,
+    "minIntervalMs": 900000
+  },
   "backup": {
     "enabled": true,
     "posBaseUrl": "http://127.0.0.1:8080",

@@ -18,6 +18,7 @@ import { TemplateEngine } from './templates/engine';
 import { ApiServer } from './api/server';
 import { BackupManager } from './backup/backup-manager';
 import { BackupScheduler } from './backup/backup-scheduler';
+import { HealthMonitor } from './health/health-monitor';
 import { InstanceLock } from './utils/instance-lock';
 import { ServiceEvent } from './types';
 
@@ -32,6 +33,7 @@ export class ThermalPrintService extends EventEmitter {
   private apiServer!: ApiServer;
   private backupManager!: BackupManager;
   private backupScheduler!: BackupScheduler;
+  private healthMonitor!: HealthMonitor;
   private isRunning = false;
   private shutdownPromise: Promise<void> | null = null;
   /** Invoked as soon as shutdown begins, before any draining. */
@@ -156,6 +158,21 @@ export class ThermalPrintService extends EventEmitter {
     const backupConfig = this.config.getBackupConfig();
     this.backupManager = new BackupManager(backupConfig, this.logger);
     this.backupScheduler = new BackupScheduler(backupConfig, this.backupManager, this.logger);
+
+    /*
+     * Health alerting reads exactly the inputs /health reads, and runs them
+     * through the same decideHealth — so an alert and the API can never
+     * disagree about whether the service is working.
+     */
+    const alerts = this.config.getAlertsConfig();
+    this.healthMonitor = new HealthMonitor(
+      alerts,
+      () => ({
+        printers: this.printerManager.getSummary(),
+        queue: this.jobQueue.getStallSignal()
+      }),
+      this.logger
+    );
     this.apiServer.setBackupScheduler(this.backupScheduler);
     this.logger.info('Backup subsystem initialized');
   }
@@ -191,6 +208,9 @@ export class ThermalPrintService extends EventEmitter {
 
       // Start the backup scheduler (polls the POS for policy + run requests)
       this.backupScheduler.start();
+
+      // Watch health so a degraded service is reported rather than discovered.
+      this.healthMonitor.start();
 
       this.isRunning = true;
       this.emit(ServiceEvent.SERVICE_STARTED, { timestamp: Date.now() });
@@ -244,6 +264,7 @@ export class ThermalPrintService extends EventEmitter {
     try {
       // Stop the backup scheduler
       this.backupScheduler?.stop();
+      this.healthMonitor?.stop();
 
       // Stop accepting new jobs
       this.processor.pause();

@@ -32,6 +32,7 @@ import {
   warnAboutPort,
   RAW_PRINT_PORT
 } from '../printers/network-diagnosis';
+import { localSweepTargets, sweepForPrinters } from '../printers/network-discovery';
 import { findByName } from '../printers/windows-printers';
 import { OriginPolicy } from './origin-policy';
 import { cashDrawerPulse } from '../escpos/builder';
@@ -440,6 +441,7 @@ export class ApiServer {
     this.app.get('/api/printers/discover', this.handleDiscoverPrinters.bind(this));
     this.app.get('/api/printers/roles', this.handleListRoles.bind(this));
     this.app.post('/api/printers/test-connection', this.handleTestConnection.bind(this));
+    this.app.get('/api/printers/discover-network', this.handleDiscoverNetwork.bind(this));
     this.app.post('/api/printers/setup', this.handleSetupPrinterByRole.bind(this));
     this.app.post('/api/printers/auto-setup', this.handleAutoSetupPrinters.bind(this));
 
@@ -1401,6 +1403,65 @@ export class ApiServer {
     });
 
     socket.connect(port, host);
+  }
+
+  /**
+   * Sweep the local subnets for thermal printers.
+   *
+   * The counterpart to USB discovery, which has always been ranked and
+   * explanatory while LAN setup just asked for an IP address the operator
+   * usually had to fetch from a self-test page.
+   *
+   * Bounded by design — see network-discovery.ts — because the dashboard is
+   * waiting on this request. A partial list is returned rather than nothing if
+   * the budget runs out, and `complete` says which happened.
+   */
+  private async handleDiscoverNetwork(req: Request, res: Response): Promise<void> {
+    try {
+      const port = Number(req.query.port ?? RAW_PRINT_PORT);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new PrintServiceError(
+          `Port ${req.query.port} is not valid. Use ${RAW_PRINT_PORT} unless the printer's manual says otherwise.`,
+          ErrorCodes.INVALID_REQUEST,
+          400
+        );
+      }
+
+      const hosts = localSweepTargets();
+
+      if (hosts.length === 0) {
+        res.json({
+          printers: [],
+          scanned: 0,
+          complete: true,
+          message:
+            'This machine is not on a private network with a /24 or smaller subnet, ' +
+            'so there is nowhere to sweep. Enter the printer\'s IP address directly.'
+        });
+        return;
+      }
+
+      const started = Date.now();
+      const { found, scanned, complete } = await sweepForPrinters(hosts, { port });
+
+      const confirmed = found.filter((p) => p.respondsToEscPos).length;
+
+      res.json({
+        printers: found,
+        scanned,
+        complete,
+        elapsedMs: Date.now() - started,
+        message:
+          found.length === 0
+            ? `Nothing is listening on port ${port} across ${scanned} addresses. ` +
+              `Check the printer is powered on and on the same network as this PC, ` +
+              `then enter its IP address directly.`
+            : `Found ${found.length} device(s) on port ${port}` +
+              (confirmed > 0 ? `, ${confirmed} confirmed as thermal printer(s).` : '.')
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
   }
 
   private async handleSetupPrinterByRole(req: Request, res: Response): Promise<void> {
