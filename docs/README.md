@@ -6,6 +6,7 @@
 | [daily-use.md](daily-use.md) | Installer / site support | Running the dashboard, adding printers, routine operation |
 | [troubleshooting.md](troubleshooting.md) | Installer / site support | Something is broken. Symptom-first |
 | [web-integration.md](web-integration.md) | Developer integrating a web app | Driving the printers from your own application over HTTP |
+| [handover.md](handover.md) | Whoever picks up development | Outstanding work, in phases. Phase 1 is the urgent one |
 
 The [top-level README](../README.md) remains the architecture and design reference, and carries the full endpoint list, configuration schema and internals.
 
