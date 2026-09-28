@@ -74,7 +74,25 @@ describe('D31 — a service that cannot print must not call itself healthy', () 
     });
 
     expect(verdict.status).toBe('degraded');
-    expect(verdict.reasons.join(' ')).toMatch(/1 of 3 printer\(s\) are in a fault state/);
+    expect(verdict.reasons.join(' ')).toMatch(/1 of 3 printer\(s\) cannot print/);
+  });
+
+  it('reports degraded when a printer is merely OFFLINE, not only in error', () => {
+    /*
+     * Caught live by the two-printer soak, not by review. The kitchen
+     * printer's socket was gone — status offline, not error — the receipt
+     * printer was fine, and health said "healthy" while every kitchen ticket
+     * sat in retry. Unreachable is not a lesser kind of cannot-print than
+     * paper-out: the site configured that printer because its work matters.
+     */
+    const verdict = decideHealth({
+      printers: printers({ total: 2, online: 1, offline: 1, error: 0 }),
+      queue: queue()
+    });
+
+    expect(verdict.status).toBe('degraded');
+    expect(verdict.reasons.join(' ')).toMatch(/1 of 2 printer\(s\) cannot print/);
+    expect(verdict.reasons.join(' ')).toMatch(/1 offline/);
   });
 });
 

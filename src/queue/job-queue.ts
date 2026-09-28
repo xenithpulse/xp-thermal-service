@@ -134,15 +134,22 @@ export class JobQueue extends EventEmitter {
   }
 
   /**
-   * Get the next job to process
+   * Get the next job to process.
+   *
+   * `busyPrinters` names printers that already have a job in flight; their
+   * pending jobs are excluded IN THE QUERY, not by scanning past them. The
+   * distinction matters: a skip-while-scanning approach dies the moment a
+   * stuck printer has more queued jobs than the scan window — ten kitchen
+   * tickets ahead of one receipt, and the receipt is invisible even though
+   * its printer is free. The store filter has no such horizon.
    */
-  dequeue(): PrintJob | null {
+  dequeue(busyPrinters?: Set<string>): PrintJob | null {
     if (this.paused) {
       return null;
     }
 
-    const pending = this.store.getPending(10);
-    
+    const pending = this.store.getPending(10, busyPrinters);
+
     for (const job of pending) {
       // Skip jobs already being processed
       if (this.processingJobs.has(job.id)) {
@@ -164,19 +171,26 @@ export class JobQueue extends EventEmitter {
   }
 
   /**
-   * Get multiple jobs for batch processing
+   * Get multiple jobs for batch processing, at most one per printer.
+   *
+   * The busy set grows as the batch fills, so a single batch can never hand
+   * out two jobs for the same printer — that would put them in concurrent
+   * flight against a serial device and re-open the slot-starvation hole
+   * per-printer dispatch exists to close.
    */
-  dequeueBatch(count: number): PrintJob[] {
+  dequeueBatch(count: number, busyPrinters?: Set<string>): PrintJob[] {
     if (this.paused) {
       return [];
     }
 
+    const busy = new Set(busyPrinters ?? []);
     const jobs: PrintJob[] = [];
-    
+
     for (let i = 0; i < count; i++) {
-      const job = this.dequeue();
+      const job = this.dequeue(busy);
       if (job) {
         jobs.push(job);
+        busy.add(job.printerId);
       } else {
         break;
       }

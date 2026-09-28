@@ -33,7 +33,13 @@ export class JobProcessor extends EventEmitter {
   
   private running = false;
   private pollTimer: NodeJS.Timeout | null = null;
-  private activeJobs: Map<string, AbortController> = new Map();
+  /**
+   * Jobs in flight, keyed by job id. The printerId rides along so dispatch
+   * can see which PRINTERS are busy, not just how many slots are taken —
+   * see poll() for why that distinction is what keeps receipts printing
+   * while the kitchen printer is down.
+   */
+  private activeJobs: Map<string, { controller: AbortController; printerId: string }> = new Map();
   private metrics = {
     totalProcessed: 0,
     totalSuccess: 0,
@@ -91,7 +97,7 @@ export class JobProcessor extends EventEmitter {
     }
 
     // Cancel all active jobs
-    for (const [jobId, controller] of this.activeJobs) {
+    for (const [jobId, { controller }] of this.activeJobs) {
       controller.abort();
       this.queue.release(jobId);
     }
@@ -121,10 +127,34 @@ export class JobProcessor extends EventEmitter {
     try {
       // Check how many slots we have available
       const availableSlots = this.config.maxConcurrentJobs - this.activeJobs.size;
-      
+
       if (availableSlots > 0 && !this.queue.isPaused()) {
-        // Get jobs up to available slots
-        const jobs = this.queue.dequeueBatch(availableSlots);
+        /*
+         * ONE JOB PER PRINTER AT A TIME.
+         *
+         * The concrete failure this prevents, on the exact two-printer layout
+         * restaurants run (USB receipt printer at the till, LAN kitchen
+         * printer upstairs): the kitchen printer wedges — cable kicked out,
+         * paper jam on a model that still accepts TCP — and its jobs take the
+         * full connect/write timeout to fail. Without per-printer dispatch,
+         * three stuck kitchen tickets occupy all three slots, and the receipt
+         * printer sits idle with paying customers waiting while the queue
+         * grinds through 30-second timeouts. KOTs are usually submitted
+         * before receipts, so the stuck jobs are at the head of the queue
+         * every single time.
+         *
+         * A thermal printer is a serial device: concurrent jobs to the same
+         * printer just queue inside its adapter while burning slots here. So
+         * single-flight per printer costs no throughput, guarantees a broken
+         * printer can only ever hold ONE slot, and keeps tickets printing in
+         * submission order per station.
+         */
+        const busyPrinters = new Set<string>();
+        for (const { printerId } of this.activeJobs.values()) {
+          busyPrinters.add(printerId);
+        }
+
+        const jobs = this.queue.dequeueBatch(availableSlots, busyPrinters);
         
         // Process jobs concurrently
         for (const job of jobs) {
@@ -157,7 +187,7 @@ export class JobProcessor extends EventEmitter {
   private async processJob(job: PrintJob): Promise<JobResult> {
     const startTime = Date.now();
     const abortController = new AbortController();
-    this.activeJobs.set(job.id, abortController);
+    this.activeJobs.set(job.id, { controller: abortController, printerId: job.printerId });
 
     this.logger.info(`Processing job ${job.id} for printer ${job.printerId}`);
 

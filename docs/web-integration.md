@@ -305,6 +305,8 @@ GET /api/jobs/:jobId/status
 >
 > `GET /api/jobs/:jobId` (without `/status`) *does* 404 with `JOB_NOT_FOUND`. Pick one and be consistent.
 
+> **Terminal jobs slim down.** Once a job reaches `completed` or `cancelled`, its `payload` is cleared (reads back as `{}`) and its rendered bytes are dropped — retaining them is what made long-running instances grow. Read the payload while the job is in flight if you need it, or keep your own copy; `dead_letter` jobs keep theirs so the Retry button can re-render.
+
 ### Job statuses
 
 | Status | Terminal? | Meaning |

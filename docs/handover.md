@@ -2,7 +2,7 @@
 
 Audience: whoever picks this up next.
 
-State: 186 tests passing, v1.0.0. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
+State: 196 tests passing. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
 
 Ordered by consequence. **Phases 1, 2 and 3 are done.** What remains is listed under [Still open](#still-open).
 
@@ -129,6 +129,77 @@ Verified live end to end, both directions:
 ```
 
 Reasons are passed through verbatim — an alert that paraphrased them would drift from what the dashboard shows for the same fault.
+
+---
+
+## Phase 4 — The two-printer floor, made boring ✅ Done
+
+A reliability pass against the deployment sites actually run — USB receipt
+printer at the till, LAN kitchen printer one floor up — with the requirement
+"heavy hours, long idle, never slows down, never stops." Proven by
+`scripts/soak.js`, which models a 600-order rush (1,200 jobs), kills the
+kitchen printer mid-service, restores it, then idles while watching memory.
+Every finding below was caught by the audit or by the soak itself, not by
+review alone.
+
+### 4.1 A dead kitchen printer froze receipts — **fixed**
+
+Dispatch handed the next N pending jobs to the worker pool regardless of
+target printer. KOTs are submitted before receipts, so three wedged kitchen
+jobs sat at the head of the queue, occupied all three slots for their full
+timeouts, and receipts — and the cash drawer that opens with them — waited.
+Dispatch is now **one job per printer at a time**, with the exclusion applied
+in SQL so a deep kitchen backlog cannot push the receipt job past the scan
+window. A thermal printer is a serial device; this costs nothing and buys
+per-station ordering too.
+
+Measured (phase B): kitchen printer killed mid-service, 120 further orders —
+**120/120 receipts completed, p95 256–263ms**, while every KOT waited in retry.
+
+### 4.2 The service got slower the longer it ran — **fixed, three layers deep**
+
+sql.js keeps the whole database in WASM memory and re-serializes ALL of it to
+disk every 5 dirty seconds. Anything the store retains is therefore paid for
+hundreds of times an hour. Three things were being retained:
+
+1. **Rendered ESC/POS blobs** (tens of KB with a logo) stayed on finished rows
+   for the 7-day window. Now cleared on `completed`/`cancelled`/`dead_letter`.
+2. **Payloads** — the soak proved blobs alone were not enough (7.6MB → only
+   5.2MB). A logo-bearing payload is ~8KB of JSON. Now cleared on
+   `completed`/`cancelled`; `dead_letter` keeps its payload so Retry can
+   re-render. Documented in web-integration.md.
+3. **Dead pages** — SQLite never returns freed pages, and `db.export()` writes
+   them all. The hourly cleanup now ends with `VACUUM`, and the sweep also
+   runs once at startup so a restart after a busy night starts compact.
+
+Measured across the three soak runs as each layer landed:
+**7,600KB → 5,208KB → 1,332KB** for the same 1,440 jobs. Heap flat at 15MB
+across the idle phase. Also added a hard cap (10,000 terminal rows) against
+floods that age-based cleanup cannot catch inside a week.
+
+### 4.3 Health called a half-dead site healthy — **fixed**
+
+`decideHealth` escalated only on `error`; a printer that was merely
+**offline** — the socket gone, which is what an unplugged LAN printer looks
+like — left health green as long as one other printer was up. Caught by the
+soak, not review. Offline now counts as a fault, and the reason names the
+split ("1 of 2 printer(s) cannot print (1 offline)"). Consequence handled:
+disabled printers are excluded from the tally, so a parked seasonal printer
+is a decision, not a permanent amber.
+
+### 4.4 What the soak asserts, every run
+
+Rush throughput (1,200 jobs, drained in ~65s, p95 submit 6–8ms), every ticket
+physically cut on the device (GS V counted, not HTTP 201s), receipts
+unaffected by a kitchen outage, zero tickets lost across the outage
+(deadLetter=0 after recovery), flat heap over idle, compact DB, and instant
+acceptance after everything. Run it with `node scripts/soak.js` after any
+queue, store, adapter or dispatch change — it is the closest thing this repo
+has to a production rehearsal, and it has caught two bugs review missed.
+
+Not covered by the soak, honestly: the USB spooler path itself (the soak's
+receipt device is a network fake; the spooler path is exercised by production
+and by printer-resolver's tests) and multi-day wall-clock time.
 
 ---
 

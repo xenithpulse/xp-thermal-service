@@ -14,6 +14,20 @@ import {
 } from '../types';
 import { Logger } from '../utils/logger';
 
+/**
+ * Most finished rows the store will hold, whatever their age. The busiest
+ * plausible site (~1000 jobs/day) reaches 7000 in a full retention week, so
+ * this only bites pathological floods.
+ */
+const MAX_TERMINAL_ROWS = 10000;
+
+/** States a job never leaves. Rows in these states carry no print blob. */
+const TERMINAL_STATUSES = new Set<JobStatus>([
+  JobStatus.COMPLETED,
+  JobStatus.CANCELLED,
+  JobStatus.DEAD_LETTER
+]);
+
 export interface JobStoreConfig {
   dbPath: string;
   maxJobAgeMs: number;
@@ -81,6 +95,17 @@ export class JobStore {
       // Start cleanup timer
       if (cleanupIntervalMs > 0) {
         this.startCleanupTimer(cleanupIntervalMs);
+
+        // Sweep once now as well. The interval alone leaves a restarted
+        // service carrying yesterday's expired rows and dead pages for a full
+        // hour — and a restart right after a busy evening is exactly when the
+        // file is at its fattest. Guarded by the same flag the timer honours,
+        // so tests that disable cleanup see no surprise deletes.
+        try {
+          this.cleanup();
+        } catch (error) {
+          this.logger.warn('Initial cleanup sweep failed:', error);
+        }
       }
 
       // Start periodic save timer (every 5 seconds if dirty)
@@ -381,10 +406,20 @@ export class JobStore {
         job.startedAt || null,
         job.completedAt || null,
         job.error || null,
-        job.rawCommands || null,
+        // A terminal row never keeps its blob, whichever path wrote it —
+        // cancel goes through here, not through markCompleted. See
+        // markCompleted for why retained blobs are what made long-running
+        // instances degrade.
+        TERMINAL_STATUSES.has(job.status) ? null : (job.rawCommands || null),
         job.metadata ? JSON.stringify(job.metadata) : null,
         job.id
       ]);
+
+      // Cancel drops the payload the same way completion does. dead_letter is
+      // the one terminal state that keeps it, because Retry re-renders from it.
+      if (job.status === JobStatus.COMPLETED || job.status === JobStatus.CANCELLED) {
+        this.db!.run(`UPDATE jobs SET payload = '{}' WHERE id = ?`, [job.id]);
+      }
 
       this.addHistorySync(job.id, job.status, job.error || undefined);
       this.markDirty();
@@ -426,18 +461,30 @@ export class JobStore {
   /**
    * Get pending jobs ready to be processed
    */
-  getPending(limit = 100): PrintJob[] {
+  /**
+   * `excludePrinters` filters in SQL rather than in the caller, so a printer
+   * with a deep backlog cannot push another printer's jobs past the LIMIT
+   * horizon. That is what keeps the receipt printer fed while the kitchen
+   * printer's queue is stuck behind a timeout.
+   */
+  getPending(limit = 100, excludePrinters?: Set<string>): PrintJob[] {
     if (!this.db) return [];
 
     return this.safeDbOp(() => {
       const now = Date.now();
+
+      const excluded = excludePrinters ? [...excludePrinters] : [];
+      const exclusion = excluded.length > 0
+        ? ` AND printer_id NOT IN (${excluded.map(() => '?').join(', ')})`
+        : '';
+
       const result = this.db!.exec(`
-        SELECT * FROM jobs 
+        SELECT * FROM jobs
         WHERE status IN ('pending', 'queued', 'retry_scheduled')
-          AND (scheduled_at IS NULL OR scheduled_at <= ?)
+          AND (scheduled_at IS NULL OR scheduled_at <= ?)${exclusion}
         ORDER BY priority DESC, created_at ASC
         LIMIT ?
-      `, [now, limit]);
+      `, [now, ...excluded, limit]);
 
       if (result.length === 0) return [];
       return result[0].values.map(row => this.rowToJob(result[0].columns, row));
@@ -676,12 +723,42 @@ export class JobStore {
 
     this.safeDbOp(() => {
       const now = Date.now();
+      /*
+       * raw_commands is dropped the moment a job is done, and this line is
+       * load-bearing for how the service ages.
+       *
+       * The blob is the rendered ESC/POS — tens of KB per receipt once a logo
+       * raster is involved. It used to stay on the row for the full 7-day
+       * retention window, and sql.js keeps the whole database in WASM memory
+       * and re-serializes ALL of it to disk on every dirty save (every ~5s of
+       * service). So a week of finished receipts was carried in RAM and
+       * rewritten to disk hundreds of times an hour, and the service got
+       * measurably slower and heavier the longer it ran — ending, on one
+       * machine, in the WASM "memory access out of bounds" crash that
+       * safeDbOp's rebuild path exists to absorb.
+       *
+       * The blob is regenerable: the payload stays, and the processor
+       * re-renders from payload whenever raw_commands is absent, so a reprint
+       * or retry loses nothing.
+       */
+      /*
+       * payload goes too — the soak proved the blob fix alone was not enough.
+       * A receipt payload carrying a logo raster is ~8KB of JSON, and 600
+       * finished orders left a 7.6MB database even with every blob cleared:
+       * same weekly-growth disease, different column. A completed row keeps
+       * what support actually uses — ids, printer, status, timestamps, error,
+       * history — and nothing that is re-render material for a print that
+       * will never run again. (dead_letter rows DO keep their payload: the
+       * Retry button re-renders from it.)
+       */
       this.db!.run(`
         UPDATE jobs SET
           status = 'completed',
           completed_at = ?,
           updated_at = ?,
-          error = NULL
+          error = NULL,
+          raw_commands = NULL,
+          payload = '{}'
         WHERE id = ?
       `, [now, now, id]);
       this.addHistorySync(id, 'completed', 'Job completed successfully');
@@ -741,10 +818,15 @@ export class JobStore {
 
     this.safeDbOp(() => {
       const now = Date.now();
+      // Dropping the blob is safe even for a job someone later retries: the
+      // payload is retained, and the processor re-renders whenever
+      // raw_commands is absent. See markCompleted for why holding blobs on
+      // terminal rows is what made long-running instances slow down.
       this.db!.run(`
         UPDATE jobs SET
           status = 'dead_letter',
-          updated_at = ?
+          updated_at = ?,
+          raw_commands = NULL
         WHERE id = ?
       `, [now, id]);
       this.addHistorySync(id, 'dead_letter', 'Moved to dead letter queue after max retries');
@@ -815,21 +897,66 @@ export class JobStore {
 
       if (count > 0) {
         this.db!.run(`
-          DELETE FROM jobs 
+          DELETE FROM jobs
           WHERE status IN ('completed', 'dead_letter', 'cancelled')
             AND updated_at < ?
         `, [cutoff]);
-
-        this.db!.run(`
-          DELETE FROM job_history 
-          WHERE job_id NOT IN (SELECT id FROM jobs)
-        `);
-
-        this.markDirty();
-        this.logger.info(`Cleaned up ${count} old jobs`);
       }
 
-      return count;
+      /*
+       * Hard cap, independent of age. Age-based retention assumes a sane
+       * arrival rate; a runaway POS loop can mint tens of thousands of
+       * finished rows inside one evening, all a week away from expiry. Since
+       * sql.js carries every row in WASM memory and re-serializes the whole
+       * file on each save, "too many rows" is not an audit-trail question,
+       * it is a memory-and-latency question. Newest rows win; nobody has
+       * ever needed the 10,001st-most-recent receipt record.
+       */
+      const capResult = this.db!.exec(`
+        SELECT COUNT(*) FROM jobs
+        WHERE status IN ('completed', 'dead_letter', 'cancelled')
+      `);
+      const terminalRows = capResult.length > 0 ? (capResult[0].values[0][0] as number) : 0;
+      let capped = 0;
+
+      if (terminalRows > MAX_TERMINAL_ROWS) {
+        capped = terminalRows - MAX_TERMINAL_ROWS;
+        this.db!.run(`
+          DELETE FROM jobs WHERE id IN (
+            SELECT id FROM jobs
+            WHERE status IN ('completed', 'dead_letter', 'cancelled')
+            ORDER BY updated_at ASC
+            LIMIT ?
+          )
+        `, [capped]);
+        this.logger.warn(
+          `Terminal job rows exceeded ${MAX_TERMINAL_ROWS}; removed the oldest ${capped}`
+        );
+      }
+
+      if (count > 0 || capped > 0) {
+        this.db!.run(`
+          DELETE FROM job_history
+          WHERE job_id NOT IN (SELECT id FROM jobs)
+        `);
+        if (count > 0) this.logger.info(`Cleaned up ${count} old jobs`);
+      }
+
+      /*
+       * Compact unconditionally. SQLite never returns freed pages to the OS
+       * on DELETE or UPDATE — they join a free list and the file keeps its
+       * high-water mark — and sql.js exports that whole page set to disk on
+       * every save. The two-printer soak measured it: rows slimmed to almost
+       * nothing at completion, yet jobs.db still weighed 5.2MB, all of it
+       * dead pages from payloads cleared seconds after they were written.
+       * VACUUM rebuilds the file at its true size; on a store this shape it
+       * is milliseconds an hour, and every 5-second save afterwards writes
+       * kilobytes instead of megabytes.
+       */
+      this.db!.run('VACUUM');
+      this.markDirty();
+
+      return count + capped;
     });
   }
 

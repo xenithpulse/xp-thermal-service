@@ -134,14 +134,27 @@ export function decideHealth(input: HealthVerdictInput): HealthVerdict {
       );
     }
     cannotComplete = true;
-  } else if (printers.error > 0) {
-    // Some printers work and some do not: receipts print and the kitchen gets
-    // nothing. This is the exact shape the 15-minute soak window recorded —
-    // kitchen=error, cashier=error, usb-receipt=offline — while this endpoint
-    // answered "healthy" on every single sample.
+  } else if (printers.error > 0 || printers.offline > 0) {
+    /*
+     * Some printers work and some do not: receipts print and the kitchen gets
+     * nothing. This is the exact shape the 15-minute soak window recorded —
+     * kitchen=error, cashier=error, usb-receipt=offline — while this endpoint
+     * answered "healthy" on every single sample.
+     *
+     * OFFLINE counts as a fault here, not only ERROR. The two-printer soak
+     * caught the gap: the kitchen printer's socket was gone (offline, not
+     * error), the receipt printer was fine, and this branch — which used to
+     * test error alone — reported the service healthy while every kitchen
+     * ticket sat in retry. A printer the site configured and enabled is a
+     * printer whose work the service has promised to do; unreachable is not
+     * a lesser kind of cannot-print than paper-out.
+     */
+    const faults: string[] = [];
+    if (printers.error > 0) faults.push(`${printers.error} in a fault state`);
+    if (printers.offline > 0) faults.push(`${printers.offline} offline`);
     reasons.push(
-      `${printers.error} of ${printers.total} printer(s) are in a fault state ` +
-      '(paper out, cover open, or unreachable).'
+      `${printers.error + printers.offline} of ${printers.total} printer(s) cannot print ` +
+      `(${faults.join(', ')}).`
     );
     cannotComplete = true;
   }

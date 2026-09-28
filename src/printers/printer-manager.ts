@@ -883,18 +883,34 @@ export class PrinterManager extends EventEmitter {
     busy: number;
     initializing: boolean;
   } {
+    /*
+     * Disabled printers are excluded from the whole tally. Since health now
+     * treats an offline printer as a fault (an unreachable kitchen printer
+     * must not read as healthy), the site needs a way to PARK a printer — a
+     * seasonal terrace station, a spare on the shelf — without living in
+     * permanent degraded. The disable toggle is that way: an entry the
+     * operator switched off is a decision, not a fault.
+     */
+    const enabled = (id: string) => this.configs.get(id)?.enabled !== false;
+
     const counts = bucketPrinterStates(
-      [...this.printers.values()].map((adapter) => adapter.state.status)
+      [...this.printers.values()]
+        .filter((adapter) => enabled(adapter.id))
+        .map((adapter) => adapter.state.status)
     );
+
     // Misconfigured printers are configured printers that cannot print, so they
     // count toward both the total and the fault tally. Leaving them out would
     // let /health report "all printers online" while an entry the operator can
     // see in the dashboard has never once connected.
+    const misconfigured = [...this.misconfigured.keys()].filter(enabled).length;
+    const enabledAdapters = [...this.printers.keys()].filter(enabled).length;
+
     return {
-      total: this.printers.size + this.misconfigured.size,
+      total: enabledAdapters + misconfigured,
       online: counts.online,
       offline: counts.offline,
-      error: counts.error + this.misconfigured.size,
+      error: counts.error + misconfigured,
       busy: counts.busy,
       initializing: this._initializing
     };
