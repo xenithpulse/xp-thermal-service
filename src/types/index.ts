@@ -285,6 +285,61 @@ export interface KOTPayload {
   isVoid?: boolean;
   isReprint?: boolean;
   category?: string;
+
+  /** The ticket's own number, distinct from the order number. */
+  kotNumber?: string;
+  /** Which round of the meal this ticket is. Printed as "ROUND 2". */
+  roundNumber?: number;
+  orderMode?: string;
+  tableSection?: string;
+  guestCount?: number;
+  date?: string;
+  storeName?: string;
+
+  /**
+   * Tenant kitchen-ticket configuration.
+   *
+   * MUST stay in sync with xp-pos types/settings.types.ts KotRenderOptions.
+   * Absent for legacy callers, which get the template's own defaults — see
+   * DEFAULT_KOT_OPTIONS in kot-template.ts.
+   */
+  options?: KotRenderOptions;
+}
+
+// ── Kitchen-ticket render contract (mirror of POS types/settings.types.ts) ───
+
+export type KotFontSize = 'small' | 'normal' | 'large';
+
+export interface KotRenderFields {
+  businessName: boolean;
+  kotNumber: boolean;
+  roundNumber: boolean;
+  orderNumber: boolean;
+  dateTime: boolean;
+  table: boolean;
+  server: boolean;
+  orderMode: boolean;
+  guestCount: boolean;
+  itemModifiers: boolean;
+  itemNotes: boolean;
+  kitchenNotes: boolean;
+  itemCount: boolean;
+  footerText: boolean;
+}
+
+export interface KotRenderOptions {
+  /** Characters per line, already resolved by the POS from paper + font size. */
+  paperWidth: number;
+  title: string;
+  fontSize: KotFontSize;
+  largeItemText: boolean;
+  markReprint: boolean;
+  /** Drop spacer lines, tighten line spacing, short feed before the cut. */
+  paperSaver: boolean;
+  /** Blank lines fed before the cut. */
+  feedLines: number;
+  fields: KotRenderFields;
+  footerText?: string;
 }
 
 export interface KOTItem {
