@@ -58,9 +58,10 @@ const ALL_FIELDS: KotRenderFields = {
 function options(over: Partial<KotRenderOptions> = {}): KotRenderOptions {
   return {
     paperWidth: 40,
+    itemPaperWidth: 20,
     title: 'KITCHEN ORDER',
     fontSize: 'normal',
-    largeItemText: true,
+    itemTextSize: 'large',
     markReprint: true,
     paperSaver: true,
     feedLines: 1,
@@ -287,6 +288,33 @@ describe('KOT template — paper economy', () => {
     expect(airy.includes(Buffer.from([0x1b, 0x33]))).toBe(false);
   });
 
+  it('compact dish lines use the condensed face even when the ticket does not', () => {
+    // ESC M 1 — Font B. The whole point of 'compact': shrink the dish lines, the
+    // bulk of the ticket's length, without condensing the routing a runner reads.
+    const compact = raw(payload({ options: options({ fontSize: 'normal', itemTextSize: 'compact' }) }));
+    const normal = raw(payload({ options: options({ fontSize: 'normal', itemTextSize: 'normal' }) }));
+    expect(compact.includes(Buffer.from([0x1b, 0x4d, 0x01]))).toBe(true);
+    expect(normal.includes(Buffer.from([0x1b, 0x4d, 0x01]))).toBe(false);
+  });
+
+  it('compact dish lines never shrink the table headline', () => {
+    // Shrinking the one line that says WHERE the food goes is the wrong trade.
+    const txt = render(payload({ options: options({ itemTextSize: 'compact' }) }));
+    expect(txt).toContain('TABLE T4');
+  });
+
+  it('compact fits more dish text per line than large', () => {
+    const dish = 'Chargha Special Full Plate With Extra Raita And Salad';
+    const lineCount = (o: Partial<KotRenderOptions>) =>
+      render(payload({ items: [{ name: dish, quantity: 1 }], options: options(o) }))
+        .split('\n')
+        .filter((l) => /Chargha|Raita|Salad|Plate/.test(l)).length;
+
+    const large = lineCount({ paperWidth: 40, itemPaperWidth: 20, itemTextSize: 'large' });
+    const compact = lineCount({ paperWidth: 40, itemPaperWidth: 52, itemTextSize: 'compact' });
+    expect(compact).toBeLessThan(large);
+  });
+
   it('the condensed font selects Font B on the wire', () => {
     // ESC M 1 — Font B.
     const small = raw(payload({ options: options({ fontSize: 'small' }) }));
@@ -298,7 +326,7 @@ describe('KOT template — paper economy', () => {
   it('a scaled line in the condensed font switches back to Font A first', () => {
     // Doubling Font B still lands smaller than plain Font A, which would make
     // "large" a downgrade. So a large line must re-select Font A.
-    const buf = raw(payload({ options: options({ fontSize: 'small', largeItemText: true }) }));
+    const buf = raw(payload({ options: options({ fontSize: 'small', itemTextSize: 'large' }) }));
     const fontA = buf.indexOf(Buffer.from([0x1b, 0x4d, 0x00]));
     const fontB = buf.indexOf(Buffer.from([0x1b, 0x4d, 0x01]));
     expect(fontB).toBeGreaterThanOrEqual(0);
@@ -340,7 +368,7 @@ describe('KOT template — wrapping', () => {
               notes: 'Guest is in a hurry, send with the first round if at all possible',
             },
           ],
-          options: options({ paperWidth, largeItemText: false }),
+          options: options({ paperWidth, itemPaperWidth: paperWidth, itemTextSize: 'normal' }),
         }),
       );
       const over = txt
@@ -356,7 +384,7 @@ describe('KOT template — wrapping', () => {
     const txt = render(
       payload({
         items: [{ name: 'Chargha Special Full Plate With Extra Raita', quantity: 1 }],
-        options: options({ paperWidth, largeItemText: true }),
+        options: options({ paperWidth, itemPaperWidth: Math.floor(paperWidth / 2), itemTextSize: 'large' }),
       }),
     );
     const itemLines = txt

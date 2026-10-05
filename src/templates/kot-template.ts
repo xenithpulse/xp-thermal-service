@@ -34,6 +34,7 @@ import {
   PrinterCapabilities,
   KOTPayload,
   KotRenderOptions,
+  KotItemTextSize,
   TextAlign,
   FontSize,
 } from '../types';
@@ -48,8 +49,8 @@ interface StyledLine {
   text: string;
   align: 'l' | 'c' | 'r';
   bold?: boolean;
-  /** 'large' = scaled item line. */
-  size?: 'normal' | 'large';
+  /** 'large' = scaled dish line; 'compact' = condensed dish line. */
+  size?: KotItemTextSize;
   kind?: 'text' | 'divider' | 'blank';
 }
 
@@ -85,10 +86,10 @@ interface KotLayoutData {
  * What a caller that sends no `options` gets: the ticket exactly as this
  * template printed it before it was configurable.
  */
-const DEFAULT_KOT_OPTIONS: Omit<KotRenderOptions, 'paperWidth'> = {
+const DEFAULT_KOT_OPTIONS: Omit<KotRenderOptions, 'paperWidth' | 'itemPaperWidth'> = {
   title: 'KITCHEN ORDER',
   fontSize: 'normal',
-  largeItemText: true,
+  itemTextSize: 'large',
   markReprint: true,
   // Off for legacy callers on purpose. Paper saver is a tenant CHOICE that the
   // new POS defaults on; silently applying it to an old till would change what
@@ -180,13 +181,16 @@ function buildLines(data: KotLayoutData, options: KotRenderOptions): StyledLine[
   // ── Meta ──────────────────────────────────────────────────────────────────
   if (f.table && data.table) {
     const where = data.tableSection ? `TABLE ${data.table} (${data.tableSection})` : `TABLE ${data.table}`;
-    push(where, 'c', { bold: true, size: options.largeItemText ? 'large' : 'normal' });
+    // The table headline tracks the dish lines: it is routing, read in the same
+    // glance. Never `compact` — shrinking the one line that says WHERE the food
+    // goes to save a few millimetres is the wrong trade.
+    push(where, 'c', { bold: true, size: options.itemTextSize === 'large' ? 'large' : 'normal' });
   } else if (f.orderMode && data.orderMode) {
     // No table: the mode IS the routing. A takeaway ticket with nothing
     // prominent on it gets plated as dine-in.
     push(modeLabel(data.orderMode).toUpperCase(), 'c', {
       bold: true,
-      size: options.largeItemText ? 'large' : 'normal',
+      size: options.itemTextSize === 'large' ? 'large' : 'normal',
     });
   }
 
@@ -211,14 +215,14 @@ function buildLines(data: KotLayoutData, options: KotRenderOptions): StyledLine[
   // Quantity first and glued to the name ("2x Chicken Karahi") rather than in a
   // right-hand column. A KOT has no amount column to balance against, and a
   // quantity at the far edge of the paper reads as belonging to the line below.
-  const size: StyledLine['size'] = options.largeItemText ? 'large' : 'normal';
+  const size: StyledLine['size'] = options.itemTextSize;
 
-  // Scaled glyphs are twice as wide, so the usable line halves. Wrapping
-  // against the full width here would push dish names off the paper — the one
-  // failure a kitchen cannot recover from, because the cook cannot tell that
-  // anything is missing.
-  const itemWidth = options.largeItemText ? Math.floor(options.paperWidth / 2) : options.paperWidth;
-  const itemLayout = new LayoutCalculator(Math.max(8, itemWidth));
+  // Resolved by the POS (kotItemCharWidth), not recomputed here: a scaled line
+  // is twice as wide so the usable columns halve, and a condensed one is
+  // narrower so they grow. Wrapping a scaled line against the full width would
+  // push dish names off the edge of the roll — the one failure a kitchen cannot
+  // recover from, because the cook cannot tell that anything is missing.
+  const itemLayout = new LayoutCalculator(Math.max(8, options.itemPaperWidth || options.paperWidth));
 
   if (data.items.length === 0) {
     push('(no items on this ticket)', 'c');
@@ -291,9 +295,17 @@ export class KOTTemplate implements TemplateRenderer {
     // centered header spans the full page. Legacy callers fall back to the
     // printer's own width.
     const legacyWidth = capabilities.maxWidth || 48;
+    const base = p.options?.paperWidth || legacyWidth;
+    // Legacy callers send no item width. Halving for 'large' reproduces exactly
+    // what this template did before the width was resolved on the POS side.
+    const legacyItemWidth = DEFAULT_KOT_OPTIONS.itemTextSize === 'large' ? Math.floor(base / 2) : base;
     const options: KotRenderOptions = p.options
-      ? { ...p.options, paperWidth: p.options.paperWidth || legacyWidth }
-      : { ...DEFAULT_KOT_OPTIONS, paperWidth: legacyWidth };
+      ? {
+          ...p.options,
+          paperWidth: base,
+          itemPaperWidth: p.options.itemPaperWidth || legacyItemWidth,
+        }
+      : { ...DEFAULT_KOT_OPTIONS, paperWidth: base, itemPaperWidth: legacyItemWidth };
 
     const data: KotLayoutData = {
       storeName: p.storeName || '',
@@ -348,18 +360,26 @@ export class KOTTemplate implements TemplateRenderer {
           if (ln.bold) builder.bold(true);
           // 'large' lines are the ones a cook reads across the line. DOUBLE_BOTH
           // rather than DOUBLE_WIDTH: height is what carries at a distance, and
-          // buildLines has already halved the wrap width to pay for the width.
+          // buildLines has already narrowed the wrap width to pay for the width.
           // A 'large' line in the condensed font switches to Font A first —
           // doubling Font B still lands smaller than plain Font A, which would
           // make "large" a downgrade.
+          //
+          // 'compact' is the opposite trade: the condensed face on the dish
+          // lines even when the rest of the ticket is Font A, for the shortest
+          // ticket the printer can produce.
           if (ln.size === 'large') {
             if (baseFont === 'B') builder.font('A');
             builder.fontSize(FontSize.DOUBLE_BOTH);
+          } else if (ln.size === 'compact' && baseFont === 'A') {
+            builder.font('B');
           }
           builder.line(ln.text);
           if (ln.size === 'large') {
             builder.fontSize(FontSize.NORMAL);
             if (baseFont === 'B') builder.font('B');
+          } else if (ln.size === 'compact' && baseFont === 'A') {
+            builder.font('A');
           }
           if (ln.bold) builder.bold(false);
         }

@@ -310,6 +310,9 @@ export interface KOTPayload {
 
 export type KotFontSize = 'small' | 'normal' | 'large';
 
+/** How big the dish lines are, independently of the rest of the ticket. */
+export type KotItemTextSize = 'compact' | 'normal' | 'large';
+
 export interface KotRenderFields {
   businessName: boolean;
   kotNumber: boolean;
@@ -330,9 +333,11 @@ export interface KotRenderFields {
 export interface KotRenderOptions {
   /** Characters per line, already resolved by the POS from paper + font size. */
   paperWidth: number;
+  /** Columns available to a dish line, which may be set in a different face. */
+  itemPaperWidth: number;
   title: string;
   fontSize: KotFontSize;
-  largeItemText: boolean;
+  itemTextSize: KotItemTextSize;
   markReprint: boolean;
   /** Drop spacer lines, tighten line spacing, short feed before the cut. */
   paperSaver: boolean;
