@@ -8,7 +8,6 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import * as net from 'net';
 import * as http from 'http';
 import * as path from 'path';
-import * as fs from 'fs';
 import cors from 'cors';
 import helmet from 'helmet';
 import { z } from 'zod';
@@ -35,6 +34,11 @@ import {
 import { localSweepTargets, sweepForPrinters } from '../printers/network-discovery';
 import { findByName } from '../printers/windows-printers';
 import { OriginPolicy } from './origin-policy';
+import { OriginPairing } from './origin-pairing';
+import { registerAppRoutes } from './app-routes';
+import { readAsset } from '../app/assets';
+import { AppMode } from '../app/paths';
+import { PRODUCT_NAME, SERVICE_ID, VERSION } from '../app/identity';
 import { cashDrawerPulse } from '../escpos/builder';
 import { decideHealth } from './health-verdict';
 import {
@@ -69,6 +73,8 @@ export interface ApiServerConfig {
   port: number;
   security: SecurityConfig;
   configManager: ConfigManager;
+  /** How the service was started; reported by /health. Defaults to legacy. */
+  mode?: AppMode;
   /**
    * Perform a graceful restart. Supplied by the service so the API does not
    * have to know how to drain the queue; without it the endpoint falls back to
@@ -104,6 +110,7 @@ export class ApiServer {
   private isShuttingDown: boolean = false;
   private backupScheduler: BackupScheduler | null = null;
   private originPolicy: OriginPolicy;
+  private readonly pairing = new OriginPairing();
   private discovery: PrinterDiscovery;
 
   constructor(
@@ -121,6 +128,7 @@ export class ApiServer {
 
     this.originPolicy = new OriginPolicy({
       allowedOrigins: config.security.allowedOrigins,
+      blockedOrigins: config.security.blockedOrigins,
       allowPrivateNetwork: config.security.allowPrivateNetwork !== false
     });
     this.discovery = new PrinterDiscovery(logger, printerManager.getPrintSystem());
@@ -191,6 +199,9 @@ export class ApiServer {
         // enough for the browser to block the response, and the guard below
         // turns it into an explanatory 403.
         this.logger.warn({ origin, reason: decision.reason }, 'CORS origin rejected');
+        // Unknown (not blocked) sites are offered to the operator in the
+        // dashboard: "this site wants to print — Allow / Block".
+        if (origin && !decision.blocked) this.pairing.note(origin);
         callback(null, false);
       },
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -349,6 +360,7 @@ export class ApiServer {
     if (
       req.path === '/health' || req.path === '/api/health' ||
       req.path === '/dashboard' || req.path === '/' ||
+      req.path === '/favicon.ico' ||
       req.path === '/api/auth/local-token'
     ) {
       return next();
@@ -492,8 +504,29 @@ export class ApiServer {
     // Local-only auth token (exempt from API key, restricted to loopback IP)
     this.app.get('/api/auth/local-token', this.handleLocalToken.bind(this));
 
+    // App management: Start with Windows, updates, origin pairing, migration
+    registerAppRoutes(this.app, {
+      mode: this.config.mode ?? 'legacy',
+      configManager: this.config.configManager,
+      pairing: this.pairing,
+      applySecurity: () => this.applySecurityConfig(),
+      activatePrinter: async (printer) => {
+        this.printerManager.registerPrinter(printer);
+        if (printer.enabled !== false) await this.printerManager.connectPrinter(printer.id);
+      },
+      logger: this.logger
+    });
+
     // Dashboard (serves static HTML)
     this.app.get('/dashboard', this.handleDashboard.bind(this));
+    this.app.get('/favicon.ico', (_req: Request, res: Response) => {
+      const icon = readAsset('icon.ico');
+      if (!icon) {
+        res.status(404).end();
+        return;
+      }
+      res.type('image/x-icon').set('Cache-Control', 'public, max-age=86400').send(icon);
+    });
     this.app.get('/', (_req: Request, res: Response) => res.redirect('/dashboard'));
   }
 
@@ -529,7 +562,7 @@ export class ApiServer {
         status,
         reasons,
         uptime: Date.now() - this.startTime,
-        version: '1.0.0',
+        version: VERSION,
         printers: printerSummary,
         queue: {
           pending: queueStats.pending,
@@ -542,9 +575,14 @@ export class ApiServer {
 
       // Identity and port, so a client scanning 9100–9109 can confirm it found
       // this service rather than something else listening on the same port.
+      //
+      // `service` keeps its old value on purpose: Pulsar POS and older clients
+      // look for exactly 'xp-thermal-service'. `name` and `mode` are additions.
       res.status(200).json({
         ...response,
-        service: 'xp-thermal-service',
+        service: SERVICE_ID,
+        name: PRODUCT_NAME,
+        mode: this.config.mode ?? 'legacy',
         port: this.activePort || this.config.port,
         configuredPort: this.config.port
       });
@@ -565,7 +603,8 @@ export class ApiServer {
         status: 'unhealthy',
         reasons: [`The health check itself failed, so the job store is unusable: ${message}`],
         uptime: Date.now() - this.startTime,
-        version: '1.0.0',
+        version: VERSION,
+        name: PRODUCT_NAME,
         error: message
       });
     }
@@ -860,7 +899,7 @@ export class ApiServer {
         printerId,
         templateType: TemplateType.TEST,
         payload: {
-          message: req.body.message || 'Test print from XP Thermal Service',
+          message: req.body.message || `Test print from ${PRODUCT_NAME}`,
           includeBarcode: req.body.includeBarcode ?? true,
           includeQR: req.body.includeQR ?? true,
           includeAllFonts: req.body.includeAllFonts ?? true
@@ -1058,8 +1097,8 @@ export class ApiServer {
 
   /**
    * Trigger a graceful process restart. Loopback-only.
-   * The Windows service wrapper (node-windows) will auto-restart the process
-   * on a non-zero exit code.
+   * The supervisor (or Pulsar's WinSW wrapper) restarts the process on a
+   * non-zero exit code.
    *
    * Used by:
    *   - POS app (E:\xp-pos\pos_modules\orders\printing-facility) for forced recovery
@@ -1077,7 +1116,7 @@ export class ApiServer {
 
     this.logger.warn({ remoteIp, ua: req.get('user-agent') }, 'Service restart requested via API');
 
-    // Acknowledge immediately, then restart so node-windows respawns us.
+    // Acknowledge immediately, then restart so the supervisor respawns us.
     res.status(202).json({
       success: true,
       message: 'Service restart initiated. In-flight print jobs will finish first.',
@@ -1094,7 +1133,6 @@ export class ApiServer {
       }
 
       // No graceful handler wired up: still better than losing the queue.
-      // eslint-disable-next-line no-console
       console.warn('[API] Restart requested — exiting process for wrapper respawn');
       process.exit(1);
     }, 500);
@@ -1234,25 +1272,7 @@ export class ApiServer {
       cm.updateSecurityConfig(req.body);
 
       // Apply new security settings to the running server
-      const newSecurity = cm.getSecurityConfig();
-      this.config.security = newSecurity;
-
-      // Origin/host rules take effect on the very next request.
-      this.originPolicy.update({
-        allowedOrigins: newSecurity.allowedOrigins,
-        allowPrivateNetwork: newSecurity.allowPrivateNetwork !== false
-      });
-
-      // Recreate rate limiter with updated limits
-      try {
-        this.rateLimiter = new RateLimiterMemory({
-          points: newSecurity.rateLimitPerMinute,
-          duration: 60,
-          blockDuration: 60,
-        });
-      } catch (rlErr) {
-        this.logger.warn({ error: rlErr }, 'Failed to recreate rate limiter, keeping previous');
-      }
+      const newSecurity = this.applySecurityConfig();
 
       res.json({
         success: true,
@@ -1262,6 +1282,33 @@ export class ApiServer {
     } catch (error) {
       this.handleError(error, res);
     }
+  }
+
+  /**
+   * Push the saved security config into the running server: origin and host
+   * rules apply from the very next request, and the rate limiter is rebuilt.
+   */
+  private applySecurityConfig(): SecurityConfig {
+    const newSecurity = this.config.configManager.getSecurityConfig();
+    this.config.security = newSecurity;
+
+    this.originPolicy.update({
+      allowedOrigins: newSecurity.allowedOrigins,
+      blockedOrigins: newSecurity.blockedOrigins,
+      allowPrivateNetwork: newSecurity.allowPrivateNetwork !== false
+    });
+
+    try {
+      this.rateLimiter = new RateLimiterMemory({
+        points: newSecurity.rateLimitPerMinute,
+        duration: 60,
+        blockDuration: 60,
+      });
+    } catch (rlErr) {
+      this.logger.warn({ error: rlErr }, 'Failed to recreate rate limiter, keeping previous');
+    }
+
+    return newSecurity;
   }
 
   private async handleListSystemPrinters(_req: Request, res: Response): Promise<void> {
@@ -1924,30 +1971,19 @@ export class ApiServer {
   }
 
   private handleDashboard(_req: Request, res: Response): void {
-    // Try multiple locations: flat install (cwd/public/), dev dist/ (../../public/)
-    const candidates = [
-      path.join(process.cwd(), 'public', 'dashboard.html'),
-      path.join(__dirname, '..', 'public', 'dashboard.html'),
-      path.join(__dirname, '..', '..', 'public', 'dashboard.html'),
-    ];
-
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
-        // Inject API key into dashboard HTML so it can authenticate API calls
-        try {
-          let html = fs.readFileSync(candidate, 'utf8');
-          const apiKey = this.config.security.enableApiKey ? (this.config.security.apiKey || '') : '';
-          const injection = `<script>window.__XP_API_KEY__=${JSON.stringify(apiKey)};</script>`;
-          html = html.replace('</head>', `${injection}\n</head>`);
-          res.type('html').send(html);
-        } catch {
-          res.sendFile(candidate);
-        }
-        return;
-      }
+    // Embedded in the exe; read from public/ (flat install, dist/, or the repo)
+    // everywhere else.
+    const page = readAsset('dashboard.html');
+    if (!page) {
+      res.status(404).send('Dashboard not found. Ensure public/dashboard.html exists.');
+      return;
     }
 
-    res.status(404).send('Dashboard not found. Ensure public/dashboard.html exists.');
+    // Inject API key into dashboard HTML so it can authenticate API calls
+    const apiKey = this.config.security.enableApiKey ? (this.config.security.apiKey || '') : '';
+    const injection = `<script>window.__XP_API_KEY__=${JSON.stringify(apiKey)};</script>`;
+    const html = page.toString('utf8').replace('</head>', `${injection}\n</head>`);
+    res.type('html').set('Cache-Control', 'no-store').send(html);
   }
 
   /**
@@ -2072,8 +2108,8 @@ export class ApiServer {
           `API server listening on http://${this.config.host}:${port}`
         );
         return;
-      } catch (error: any) {
-        if (error.code === 'EADDRINUSE') {
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
           this.logger.warn(`Port ${port} is in use, trying next…`);
           continue;
         }

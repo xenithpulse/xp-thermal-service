@@ -1,35 +1,35 @@
 # Installation & Verification
 
-Audience: on-site IT installer. Assumes Administrator access, PowerShell, and familiarity with Windows Services.
+Audience: whoever sets up the till: the owner, or on-site IT. No administrator
+rights are needed for the standard install.
 
-For day-to-day operation see [daily-use.md](daily-use.md). When something is broken see [troubleshooting.md](troubleshooting.md). To connect a web app to the API see [web-integration.md](web-integration.md).
+For day-to-day operation see [daily-use.md](daily-use.md). When something is broken see [troubleshooting.md](troubleshooting.md). To connect a web app to the API see [web-integration.md](web-integration.md). For POS or fleet installs as a Windows service see [SERVICE-MODE.md](SERVICE-MODE.md).
 
 ---
 
 ## Read this first: the dashboard is not always on port 9100
 
-The service binds the first free port in **9100–9109**. Port 9100 is the IANA-registered RAW/JetDirect printing port, so on any machine with a network printer, a print server, or a previous instance still holding the socket, **the service will silently land on 9101 or higher.**
+Thermal Bridge listens on the first free port from **9100** (up to 9109). Port 9100 is also the standard RAW/JetDirect printing port, so on a machine with a network printer, a print server, or the old XP Thermal Service, **it will land on 9101 or higher.**
 
-This is by design, not a fault. It is also the single most common support call, because the operator types `127.0.0.1:9100` and gets someone else's 404.
-
-Never assume 9100. Always resolve the port:
+This is by design. The dashboard's banner always shows the real port, and so does the tray tooltip. From a script:
 
 ```powershell
-type "$env:ProgramData\XPThermalService\active_port.txt"
+type "$env:LOCALAPPDATA\ThermalBridge\active_port.txt"      # installed app (this user)
+type "$env:ProgramData\ThermalBridge\active_port.txt"       # Windows service install
 ```
 
-If that file is missing or stale, ask the service directly — only the real service answers with `"service":"xp-thermal-service"`:
+Or ask each port. Only Thermal Bridge (and the old service) answers with `"service":"xp-thermal-service"`:
 
 ```powershell
-9100..9109 | ForEach-Object {
+9100..9110 | ForEach-Object {
     try {
         $r = Invoke-RestMethod "http://127.0.0.1:$_/health" -TimeoutSec 1
-        "{0}  {1}  {2}" -f $_, $r.service, $r.status
+        "{0}  {1}  {2}  {3}" -f $_, $r.service, $r.name, $r.mode
     } catch {}
 }
 ```
 
-Any port that responds with something *other* than `xp-thermal-service` is a different application squatting on the port. That is worth noting on the handover sheet — it will happen again on every reboot.
+A response without `name` is the old XP Thermal Print Service.
 
 ---
 
@@ -37,42 +37,47 @@ Any port that responds with something *other* than `xp-thermal-service` is a dif
 
 | Requirement | Notes |
 |---|---|
-| Windows 10/11 or Server 2016+ | x64 |
-| Node.js 18 or newer | `node --version` — the installer aborts without it |
-| Administrator rights | Service registration, firewall rules, scheduled tasks |
-| Print Spooler running | The service declares a dependency on it |
+| Windows 10 or 11, x64 | Windows 7/8.1 are not supported |
+| Print Spooler running | USB printing goes through it |
 | Printer driver installed | `Generic / Text Only` is correct for most ESC/POS units |
 
-The service must reach the printer through Windows. If `Get-Printer` does not list it, no amount of configuration here will help.
+Not needed: Node.js, administrator rights, firewall changes.
 
 ---
 
 ## Install
 
-### Standard install
+1. Download `ThermalBridge-Setup.exe` from the [latest release](https://github.com/xenithpulse/xp-thermal-service/releases/latest).
+2. Double-click it. There is no UAC prompt: it installs for the current Windows
+   user into `%LOCALAPPDATA%\Programs\ThermalBridge`.
+3. Click **Install**. It takes a few seconds. Leave **Open Thermal Bridge now**
+   ticked and click **Finish**; the dashboard opens.
 
-Right-click `setup.bat` → **Run as administrator**.
-
-It checks Node, runs `npm install`, builds TypeScript, creates `config.json` from `config.example.json` if absent, registers the Windows service, then probes 9100–9110 and opens the dashboard on whichever port answered.
-
-If the browser does not open, the install still probably succeeded — verify manually below.
-
-### Direct PowerShell install
+Until the releases are code-signed, Windows may show *"Windows protected your PC"*.
+Click **More info → Run anyway**, after checking the file against
+`SHA256SUMS.txt` from the release if you want to be sure:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+Get-FileHash .\ThermalBridge-Setup.exe -Algorithm SHA256
 ```
 
-Switches:
+Thermal Bridge now runs in the background with a tray icon, and starts
+whenever this user signs in to Windows (turn that off from the tray or the
+dashboard's Settings → General).
 
-| Switch | Effect |
-|---|---|
-| `-Repair` | Reinstall over an existing install, preserving `config.json` |
-| `-Start` / `-Stop` / `-Restart` | Service lifecycle |
-| `-Uninstall` | Remove service, firewall rules, scheduled tasks |
-| `-Silent` | Suppress console output, for unattended deployment |
+**Portable instead:** `ThermalBridge-Portable-<version>.exe` runs from any
+folder or USB stick, without installing. It uses the same settings folder.
 
-`-Repair` is the correct response to a half-finished or previously failed install. Do not attempt to fix a broken install by hand.
+**Silent install** (same per-user install, no window):
+
+```bat
+ThermalBridge-Setup.exe /S              :: install, then start Thermal Bridge in the background
+ThermalBridge-Setup.exe /S /NOLAUNCH    :: install only
+```
+
+Exit code `0` means installed, `1` failed. `/SILENT` and `/VERYSILENT` also
+work, so existing deployment scripts need no change. Every run, silent or not,
+writes a log to `%TEMP%\ThermalBridge-Setup.log`.
 
 ---
 
@@ -80,118 +85,105 @@ Switches:
 
 | Path | Contents |
 |---|---|
-| `%ProgramData%\XPThermalService\` | Install root |
-| `%ProgramData%\XPThermalService\config.json` | Printer roles, security, backup policy |
-| `%ProgramData%\XPThermalService\active_port.txt` | The port actually bound |
-| `%ProgramData%\XPThermalService\logs\` | Service logs |
-| `%ProgramData%\XPThermalService\daemon\*.log` | Service wrapper stdout/stderr |
-| `%TEMP%\XPThermalInstall_*.log` | Installer transcript — read this when an install fails |
+| `%LOCALAPPDATA%\Programs\ThermalBridge\ThermalBridge.exe` | The app |
+| `%LOCALAPPDATA%\Programs\ThermalBridge\Uninstall.exe` | The uninstaller |
+| `%LOCALAPPDATA%\ThermalBridge\config.json` | Printers, allowed websites, settings |
+| `%LOCALAPPDATA%\ThermalBridge\data\jobs.db` | Print queue and history |
+| `%LOCALAPPDATA%\ThermalBridge\active_port.txt` | The port actually bound |
+| `%LOCALAPPDATA%\ThermalBridge\logs\` | `service.log`, `supervisor.log`, `console.log` |
+| `%LOCALAPPDATA%\ThermalBridge\bin\` | Tray icon helper, extracted on first run |
+| Start Menu → **Thermal Bridge** | Shortcut |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ThermalBridge` | Start with Windows |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ThermalBridge` | The entry in Settings → Apps |
 
-`%ProgramData%` is normally `C:\ProgramData`, but the installer falls back through `%ALLUSERSPROFILE%` and `%SystemDrive%\ProgramData` on redirected systems.
-
-Also registered:
-
-- Windows service — **name** `xpthermalprintservice.exe`, **display name** `XP Thermal Print Service`
-- Inbound firewall rule `XP Thermal Service`, TCP 9100–9110, private + domain profiles
-- Scheduled tasks `XPThermalServiceWatchdog` and `XPThermalServiceHeartbeat`
-
-### The service name trips people up
-
-The service's **Name** and its **DisplayName** differ, and not every tool accepts both:
-
-```powershell
-Get-Service -Name xpthermalprintservice.exe          # works
-Get-Service -Name "XP Thermal Print Service"         # works - PowerShell resolves display names
-sc.exe query xpthermalprintservice.exe               # works
-sc.exe query "XP Thermal Print Service"              # FAILS 1060 - sc.exe needs the real Name
-```
-
-Use `xpthermalprintservice.exe` in anything that shells out to `sc.exe`, `net start`, or the registry. `XP Thermal Print Service` is additionally listed as a *legacy* service name that the installer actively removes.
+Not created: no Windows service, no firewall rule, no scheduled task.
+Thermal Bridge listens on `127.0.0.1` only, so Windows Firewall has nothing to ask about.
 
 ---
 
 ## Verify the install
 
-Run all five. Any failure sends you to [troubleshooting.md](troubleshooting.md).
-
 ```powershell
-# 1. Service exists and is running
-Get-Service -Name xpthermalprintservice.exe
+# 1. It is running (supervisor, print server, tray)
+Get-Process ThermalBridge, ThermalBridgeTray
 
-# 2. Start type is Automatic
-(Get-CimInstance Win32_Service -Filter "Name='xpthermalprintservice.exe'").StartMode
+# 2. It is Thermal Bridge, and it is healthy
+$port = (type "$env:LOCALAPPDATA\ThermalBridge\active_port.txt").Trim()
+Invoke-RestMethod "http://127.0.0.1:$port/health" | Format-List status, reasons, name, mode, service, port
 
-# 3. Something is listening in range
-netstat -ano | findstr ":910"
-
-# 4. It is OUR service, and it is healthy
-$port = (type "$env:ProgramData\XPThermalService\active_port.txt").Trim()
-Invoke-RestMethod "http://127.0.0.1:$port/health" | Format-List status, reasons, service, port, configuredPort
-
-# 5. Dashboard renders
-Start-Process "http://127.0.0.1:$port/dashboard"
+# 3. It starts with Windows
+Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name ThermalBridge
 ```
 
-`status` is `healthy`, `degraded`, or `unhealthy`, and `reasons` is a plain-language array explaining any non-healthy status. `port` versus `configuredPort` tells you immediately whether the fallback engaged.
-
-A `503` from `/health` means the job store itself is unusable — the process needs restarting, not reconfiguring.
+`status` is `healthy`, `degraded` or `unhealthy`, and `reasons` explains any
+non-healthy status in plain words. A `503` from `/health` means the job store
+itself is unusable; the supervisor restarts the server by itself.
 
 ---
 
 ## First printer setup
 
-Dashboard → **Printers** → **Find Printers** → **Use as Receipt** or **Use as Kitchen** on the printer you want.
+Dashboard → **Detect printers**. It lists the printers Windows knows about and
+scans the local network for printers on port 9100. For each one you want:
+type a name, then under **Use as** click **Receipt**, **Kitchen (KOT)**, **Bar** or **Labels**.
 
-A test receipt prints automatically on assignment. If it prints, that role is done — there are no widths, ids, or capability checkboxes to set.
+A test receipt prints on assignment. Then click **Print test page** at the top
+of the dashboard to print on the default printer.
 
-Printer ids are **roles**, not devices. `receipt` and `kitchen` are what the POS addresses; which physical unit fills the role is configuration. Repointing a role at a different device requires no POS change.
+Printer ids are **roles**, not devices. `receipt` and `kitchen` are what the
+POS addresses; which physical unit fills the role is configuration. Pointing a
+role at a different printer needs no POS change.
+
+### Coming from XP Thermal Service
+
+If the old service's settings are found, the dashboard offers **Import printers**.
+While the old service is running, Thermal Bridge leaves printing to it. Remove
+it when ready; see [legacy/README.md](../legacy/README.md).
 
 ---
 
-## Updating an existing install
+## Updating
 
-The deployed copy does **not** self-update. Re-run the installer on each machine.
+Tray → **Check for updates** (or Settings → General → Updates). Thermal Bridge downloads
+the new installer, verifies its SHA-256 against the update manifest and its
+code signature, and then offers **Install update**. A small progress window
+closes Thermal Bridge, updates it, starts it again and closes itself; settings
+and the print queue are kept. Nothing is downloaded or installed without a
+click.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Repair
-```
-
-Critically: **`Restart-Service` does not cycle the Node child process.** A new build will not take effect after a plain service restart. Use the dashboard's restart button, or:
-
-```powershell
-$port = (type "$env:ProgramData\XPThermalService\active_port.txt").Trim()
-Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/service/restart"
-```
-
-That endpoint is loopback-only.
+Installing a newer `ThermalBridge-Setup.exe` by hand does the same.
 
 ---
 
 ## Uninstall
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Uninstall
-```
+*Settings → Apps → Installed apps → Thermal Bridge → Uninstall.* It stops the
+app and removes it, its Start Menu shortcut and its Start-with-Windows entry.
+Your printer settings and print history (in `%LOCALAPPDATA%\ThermalBridge`) are
+kept, so installing again picks up where you left off, unless you tick **Also
+delete printer settings and print history**.
 
-or `scripts\uninstall.bat` as Administrator. Removes the service, firewall rule, and scheduled tasks. `config.json` and logs are left in place deliberately — delete `%ProgramData%\XPThermalService\` by hand if you want a clean slate.
+Silently, keeping settings:
+
+```bat
+"%LOCALAPPDATA%\Programs\ThermalBridge\Uninstall.exe" /S
+```
 
 ---
 
 ## Handover checklist
 
-- [ ] `/health` returns `status: healthy` with `service: xp-thermal-service`
-- [ ] Actual port recorded and given to the POS integrator (**not assumed to be 9100**)
-- [ ] If the port is not 9100, note what is holding 9100
-- [ ] Service start type is `Auto`
-- [ ] Test receipt printed from each configured role
+- [ ] Dashboard banner says **Running** with the expected number of printers online
+- [ ] Actual port noted for the POS integrator (**not assumed to be 9100**)
+- [ ] Test page printed from each configured role
 - [ ] Cash drawer verified via **Test drawer now**, if fitted
-- [ ] POS origin present in `security.allowedOrigins`
-- [ ] Survives a reboot — actually reboot and re-check `/health`
+- [ ] The POS website allowed (it appears as *"… wants to print"* the first time it calls)
+- [ ] Start with Windows is on (Settings → General)
+- [ ] Survives a reboot: actually reboot, sign in, and check the dashboard
 
 ---
 
 ## Connecting a web application
 
-If the site also needs to drive the printers from its own web app, hand the integrator [web-integration.md](web-integration.md) — it covers port discovery, the API key, CORS clearance, and the print/job contract.
-
-Two things they will need from you at handover: the **API key** (dashboard → Settings) and their **origin added to `security.allowedOrigins`**.
+Hand the integrator [web-integration.md](web-integration.md). It covers port
+discovery, the API key, CORS, and the print/job contract.

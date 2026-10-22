@@ -1,6 +1,13 @@
 /**
- * XP Thermal Service - Main Entry Point
- * Production-grade thermal printing service for restaurant POS
+ * Thermal Bridge - print server
+ *
+ * The service itself: queue, printers, API, watchdogs. It runs two ways:
+ *
+ *   node dist/index.js        legacy mode, as Pulsar POS's WinSW wrapper and
+ *                             `npm run dev` start it. Unchanged behaviour.
+ *   ThermalBridge.exe         the exe's supervisor starts this as a child
+ *     (child process)         process in 'user' or 'service' mode, with its
+ *                             data directory as the working directory.
  */
 
 import * as path from 'path';
@@ -20,7 +27,9 @@ import { BackupManager } from './backup/backup-manager';
 import { BackupScheduler } from './backup/backup-scheduler';
 import { HealthMonitor } from './health/health-monitor';
 import { InstanceLock } from './utils/instance-lock';
-import { ServiceEvent } from './types';
+import { ServiceEvent, TemplateType, JobPriority } from './types';
+import { AppMode, legacyDataDir } from './app/paths';
+import { PRODUCT_NAME, SERVICE_ID, VERSION } from './app/identity';
 
 export class ThermalPrintService extends EventEmitter {
   private config: ConfigManager;
@@ -36,19 +45,29 @@ export class ThermalPrintService extends EventEmitter {
   private healthMonitor!: HealthMonitor;
   private isRunning = false;
   private shutdownPromise: Promise<void> | null = null;
+  private readonly mode: AppMode;
   /** Invoked as soon as shutdown begins, before any draining. */
   onStopping?: () => void;
 
-  constructor(configPath?: string) {
+  constructor(configPath?: string, options: { mode?: AppMode } = {}) {
     super();
-    
-    // Load configuration
-    this.config = new ConfigManager(configPath);
-    
-    // Initialize logger
-    this.logger = createLogger(this.config.getLoggingConfig());
-    
-    this.logger.info('XP Thermal Service initializing...');
+    this.mode = options.mode ?? 'legacy';
+
+    // Load configuration. Pulsar's origins are only merged in when running
+    // for Pulsar; the per-user app pairs origins from the dashboard instead.
+    this.config = new ConfigManager(configPath, { mergePosOrigins: this.mode !== 'user' });
+
+    // Initialize logger. Under the exe there is no console: the supervisor
+    // captures stdout into logs\console.log, so pretty-printing a copy of every
+    // line there would only double the disk writes. A file is always kept.
+    const logging = this.config.getLoggingConfig();
+    this.logger = createLogger(
+      this.mode === 'legacy'
+        ? logging
+        : { ...logging, console: false, file: logging.file || './logs/service.log' }
+    );
+
+    this.logger.info(`${PRODUCT_NAME} ${VERSION} initializing (${this.mode} mode)...`);
   }
 
   /**
@@ -146,6 +165,7 @@ export class ThermalPrintService extends EventEmitter {
         port: serverConfig.port,
         security: securityConfig,
         configManager: this.config,
+        mode: this.mode,
         onRestartRequested: (reason) => {
           void this.restart(reason);
         }
@@ -154,8 +174,12 @@ export class ThermalPrintService extends EventEmitter {
     );
     this.logger.info('API server initialized');
 
-    // Initialize backup subsystem (policy comes from the POS dashboard)
-    const backupConfig = this.config.getBackupConfig();
+    // Initialize backup subsystem (policy comes from the POS dashboard). It
+    // dumps Pulsar POS's MongoDB, so the per-user app never runs it.
+    const backupConfig =
+      this.mode === 'user'
+        ? { ...this.config.getBackupConfig(), enabled: false }
+        : this.config.getBackupConfig();
     this.backupManager = new BackupManager(backupConfig, this.logger);
     this.backupScheduler = new BackupScheduler(backupConfig, this.backupManager, this.logger);
 
@@ -187,7 +211,7 @@ export class ThermalPrintService extends EventEmitter {
     }
 
     try {
-      this.logger.info('Starting XP Thermal Service...');
+      this.logger.info(`Starting ${PRODUCT_NAME}...`);
       
       // Initialize components
       this.initialize();
@@ -222,12 +246,12 @@ export class ThermalPrintService extends EventEmitter {
         printers: printerSummary,
         configuredPort: this.config.getServerConfig().port,
         activePort
-      }, 'XP Thermal Service started successfully');
+      }, `${PRODUCT_NAME} started successfully`);
 
       // Write active port to file for external discovery
       this.writeActivePortFile(activePort);
 
-      console.log(`\n  XP Thermal Service is running on http://${this.config.getServerConfig().host}:${activePort}\n`);
+      console.log(`\n  ${PRODUCT_NAME} ${VERSION} is running on http://${this.config.getServerConfig().host}:${activePort}\n`);
 
     } catch (error) {
       this.logger.error({ error }, 'Failed to start service');
@@ -254,7 +278,7 @@ export class ThermalPrintService extends EventEmitter {
   }
 
   private async doStop(): Promise<void> {
-    this.logger.info('Stopping XP Thermal Service...');
+    this.logger.info(`Stopping ${PRODUCT_NAME}...`);
 
     // Hand the instance lock over immediately. We are leaving regardless, and
     // draining can take tens of seconds; holding the lock through that would
@@ -292,7 +316,7 @@ export class ThermalPrintService extends EventEmitter {
 
       this.isRunning = false;
       this.emit(ServiceEvent.SERVICE_STOPPED, { timestamp: Date.now() });
-      this.logger.info('XP Thermal Service stopped');
+      this.logger.info(`${PRODUCT_NAME} stopped`);
 
     } catch (error) {
       this.logger.error({ error }, 'Error during shutdown');
@@ -314,7 +338,10 @@ export class ThermalPrintService extends EventEmitter {
     // it is looking at and can sanity-check it against the running service.
     const descriptor = JSON.stringify(
       {
-        service: 'xp-thermal-service',
+        service: SERVICE_ID,
+        name: PRODUCT_NAME,
+        version: VERSION,
+        mode: this.mode,
         port,
         host: this.config.getServerConfig().host,
         baseUrl: `http://127.0.0.1:${port}`,
@@ -349,10 +376,12 @@ export class ThermalPrintService extends EventEmitter {
   /**
    * Where to publish the active port.
    *
-   * The install directory is the historical location, but a client only finds
-   * it if it already knows where the service was installed. ProgramData is a
-   * fixed, machine-wide path that any POS build can read without configuration,
-   * which matters because the service may fall back to a non-default port.
+   * The working directory is the data directory in every mode, so it always
+   * gets a copy. Pulsar POS, though, looks only under
+   * %ProgramData%\XPThermalService, a fixed machine-wide path it can read
+   * without configuration. Legacy and service mode both write there so the POS
+   * needs no changes. The per-user app does not: that folder belongs to the
+   * machine-wide install, and a standard user cannot write to it.
    */
   private getPortFileTargets(): string[] {
     const cwd = process.cwd();
@@ -362,12 +391,14 @@ export class ThermalPrintService extends EventEmitter {
       path.join(cwd, 'data', 'service-endpoint.json')
     ];
 
-    const programData = process.env.ProgramData || process.env.ALLUSERSPROFILE;
-    if (programData) {
-      targets.push(
-        path.join(programData, 'XPThermalService', 'active_port.txt'),
-        path.join(programData, 'XPThermalService', 'service-endpoint.json')
-      );
+    if (this.mode !== 'user') {
+      const legacy = legacyDataDir();
+      if (path.resolve(legacy).toLowerCase() !== path.resolve(cwd).toLowerCase()) {
+        targets.push(
+          path.join(legacy, 'active_port.txt'),
+          path.join(legacy, 'service-endpoint.json')
+        );
+      }
     }
 
     return targets;
@@ -409,6 +440,37 @@ export class ThermalPrintService extends EventEmitter {
   }
 
   /**
+   * Queue a test page on a printer (the default one when none is named).
+   * Backs the tray's "Print test page"; the dashboard uses the API route.
+   */
+  printTestPage(printerId?: string): { jobId: string; printerId: string } {
+    const target =
+      printerId ||
+      this.printerManager.getDefaultPrinter()?.id ||
+      this.printerManager.getAllPrinters().find((p) => p.enabled)?.id;
+    if (!target) {
+      throw new Error('No printer is set up yet. Open the dashboard and click "Detect printers".');
+    }
+    const { job } = this.jobQueue.createJob({
+      idempotencyKey: `test_${target}_${Date.now()}`,
+      printerId: target,
+      templateType: TemplateType.TEST,
+      payload: { message: `Test page from ${PRODUCT_NAME}` },
+      priority: JobPriority.HIGH
+    });
+    return { jobId: job.id, printerId: target };
+  }
+
+  /** Name and online state of each printer, for the tray menu. */
+  getPrinterBrief(): Array<{ id: string; name: string; online: boolean }> {
+    return (this.printerManager?.getAllPrinters() ?? []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      online: p.state.isConnected
+    }));
+  }
+
+  /**
    * Stop cleanly and exit so the service wrapper restarts us.
    *
    * Used by the restart API and the health watchdog. Goes through the full
@@ -446,7 +508,8 @@ export class ThermalPrintService extends EventEmitter {
       this.flushPersistence();
     }
 
-    // Non-zero so the node-windows wrapper treats it as a crash and respawns.
+    // Non-zero so the supervisor (or Pulsar's WinSW wrapper) treats it as a
+    // crash and respawns.
     process.exit(1);
   }
 
@@ -526,7 +589,7 @@ const PRODUCTION_CONFIG = {
 };
 
 /**
- * Main entry point
+ * Main entry point for `node dist/index.js` (legacy mode).
  */
 async function main(): Promise<void> {
   // When running as a Windows service, CWD may not be the project directory.
@@ -540,44 +603,30 @@ async function main(): Promise<void> {
 
   // Check for CLI arguments
   const args = process.argv.slice(2);
-  
+
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
-XP Thermal Print Service
-========================
+${PRODUCT_NAME} ${VERSION} (print server)
+==============================
 
-A production-grade thermal printing service for restaurant POS systems.
+Runs the print server in the foreground, from the current folder.
+Most people want ThermalBridge.exe instead, which needs no Node.js.
 
 Usage:
-  node index.js [options]
+  node dist/index.js [options]
 
 Options:
   --config <path>   Path to configuration file
   --help, -h        Show this help message
 
-Service Management (Windows):
-  node dist/service/installer.js install    Install as Windows service
-  node dist/service/installer.js uninstall  Uninstall Windows service
-  node dist/service/installer.js start      Start the service
-  node dist/service/installer.js stop       Stop the service
+Windows service (for POS and fleet installs, run as Administrator):
+  ThermalBridge.exe --install-service
+  ThermalBridge.exe --uninstall-service
 
 Environment Variables:
   XP_CONFIG_PATH    Path to configuration file
-  XP_LOG_LEVEL      Log level (trace, debug, info, warn, error)
-  XP_PORT           API server port
-
-For more information, see the documentation.
 `);
     process.exit(0);
-  }
-
-  // When running as Windows service, add startup delay to let system stabilize
-  const isService = process.env.NODE_ENV === 'production' || 
-                    process.cwd().includes('ProgramData');
-  
-  if (isService) {
-    console.log(`Service startup delay (${PRODUCTION_CONFIG.serviceStartupDelayMs}ms)...`);
-    await new Promise(resolve => setTimeout(resolve, PRODUCTION_CONFIG.serviceStartupDelayMs));
   }
 
   // Get config path from args or environment
@@ -587,6 +636,39 @@ For more information, see the documentation.
     configPath = args[configIndex + 1];
   } else if (process.env.XP_CONFIG_PATH) {
     configPath = process.env.XP_CONFIG_PATH;
+  }
+
+  await runServer({ mode: 'legacy', configPath });
+}
+
+export interface RunServerOptions {
+  mode: AppMode;
+  configPath?: string;
+}
+
+/**
+ * Start the print server in this process and keep it healthy: the instance
+ * lock, signal handling, crash-time flushing, and the watchdogs that exit so
+ * the supervisor (or Pulsar's WinSW wrapper) respawns a fresh process.
+ *
+ * Expects the working directory to be the data directory already.
+ */
+export async function runServer(options: RunServerOptions): Promise<ThermalPrintService> {
+  const { mode, configPath } = options;
+
+  // Legacy mode keeps its old heuristic for "am I the installed service?".
+  // Under the exe a supervisor is always there to respawn us, so the
+  // watchdogs always run.
+  const legacyService =
+    mode === 'legacy' &&
+    (process.env.NODE_ENV === 'production' || process.cwd().includes('ProgramData'));
+  const isService = mode === 'service' || legacyService;
+  const monitored = mode !== 'legacy' || legacyService;
+
+  // When running as Windows service, add startup delay to let system stabilize
+  if (isService) {
+    console.log(`Service startup delay (${PRODUCTION_CONFIG.serviceStartupDelayMs}ms)...`);
+    await new Promise(resolve => setTimeout(resolve, PRODUCTION_CONFIG.serviceStartupDelayMs));
   }
 
   // Refuse to run alongside another instance. The port fallback means a second
@@ -604,7 +686,7 @@ For more information, see the documentation.
   }
 
   // Create and start service
-  const service = new ThermalPrintService(configPath);
+  const service = new ThermalPrintService(configPath, { mode });
   let isShuttingDown = false;
 
   // Release as soon as we start going down, so the replacement process can
@@ -653,6 +735,12 @@ For more information, see the documentation.
         shutdown('SERVICE_STOP');
       }
     });
+  }
+
+  // Under the exe, losing the supervisor means nobody can stop or restart us
+  // any more. Leave cleanly rather than linger as an orphan holding the port.
+  if (mode !== 'legacy') {
+    process.on('disconnect', () => shutdown('SUPERVISOR_GONE'));
   }
 
   // Handle uncaught errors — log and exit, let service manager restart.
@@ -893,15 +981,16 @@ For more information, see the documentation.
     lock.startHeartbeat();
 
     // Start health monitoring in production
-    if (isService || process.env.NODE_ENV === 'production') {
+    if (monitored) {
       startHealthMonitoring();
     }
-    
+
     // If running interactively, show startup message
-    if (!isService) {
-      console.log('\nXP Thermal Service is running.');
+    if (mode === 'legacy' && !isService) {
+      console.log(`\n${PRODUCT_NAME} is running.`);
       console.log('Press Ctrl+C to stop.\n');
     }
+    return service;
   } catch (error) {
     console.error('FATAL: Failed to start service:', error);
     stopHealthMonitoring();
@@ -909,8 +998,11 @@ For more information, see the documentation.
   }
 }
 
+/** Defined as true by the exe bundle, whose entry point is src/app/main.ts. */
+declare const __THERMAL_BRIDGE_EXE__: boolean | undefined;
+
 // Run if executed directly
-if (require.main === module) {
+if (require.main === module && typeof __THERMAL_BRIDGE_EXE__ === 'undefined') {
   main();
 }
 

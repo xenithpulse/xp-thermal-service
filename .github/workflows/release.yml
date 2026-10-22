@@ -1,0 +1,98 @@
+# Builds and publishes a release when a v* tag is pushed:
+#   lint + test -> exe + installer (optionally signed) -> GitHub Release -> R2 update channel
+#
+# Repository secrets (all optional; without them the build is unsigned and/or
+# R2 is skipped, with a warning). See docs/BUILD.md.
+#   SIGN_PFX_BASE64, SIGN_PFX_PASSWORD               code-signing certificate (.pfx, base64)
+#   RCLONE_CONFIG_R2POS_ACCESS_KEY_ID                R2 API token (Object Read & Write on the bucket)
+#   RCLONE_CONFIG_R2POS_SECRET_ACCESS_KEY
+#   RCLONE_CONFIG_R2POS_ENDPOINT                     https://<account_id>.r2.cloudflarestorage.com
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Check the tag matches package.json
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match package.json version $version" }
+
+      - name: Prepare the code-signing certificate
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+        run: |
+          if (-not $env:SIGN_PFX_BASE64) {
+            Write-Host "::warning::No code-signing certificate is configured. This release will be unsigned and SmartScreen will warn users."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          "SIGN_PFX_PATH=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build the exe and installer
+        env:
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: npm run build:exe
+
+      - name: Remove the certificate
+        if: always()
+        shell: pwsh
+        run: Remove-Item (Join-Path $env:RUNNER_TEMP 'signing.pfx') -Force -ErrorAction SilentlyContinue
+
+      - name: Create the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          gh release create "${{ github.ref_name }}" `
+            "release/ThermalBridge-Setup-$version.exe" `
+            "release/ThermalBridge-Setup.exe" `
+            "release/ThermalBridge-Portable-$version.exe" `
+            "release/SHA256SUMS.txt" `
+            "release/manifest.json" `
+            --title "Thermal Bridge $version" `
+            --notes-file build/release-notes.md
+
+      - name: Publish to the R2 update channel
+        shell: pwsh
+        env:
+          RCLONE_CONFIG_R2POS_TYPE: s3
+          RCLONE_CONFIG_R2POS_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2POS_ACCESS_KEY_ID: ${{ secrets.RCLONE_CONFIG_R2POS_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2POS_SECRET_ACCESS_KEY: ${{ secrets.RCLONE_CONFIG_R2POS_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2POS_ENDPOINT: ${{ secrets.RCLONE_CONFIG_R2POS_ENDPOINT }}
+        run: |
+          if (-not $env:RCLONE_CONFIG_R2POS_ACCESS_KEY_ID) {
+            Write-Host "::warning::R2 secrets are not set; the update channel was not published."
+            exit 0
+          }
+          choco install rclone -y --no-progress
+          npm run publish:r2

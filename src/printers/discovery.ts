@@ -6,6 +6,7 @@
  * adding one is a single click rather than a form full of guesses.
  */
 
+import * as os from 'os';
 import { USBPrinterAdapter } from './usb-adapter';
 import { NetworkPrinterAdapter } from './network-adapter';
 import { getWindowsPrintSystem, WindowsPrintSystem } from './windows-printers';
@@ -432,11 +433,10 @@ export class PrinterDiscovery {
    */
   private detectSubnet(): string {
     // Try to detect the local subnet from network interfaces
-    const os = require('os');
     const interfaces = os.networkInterfaces();
 
     for (const name of Object.keys(interfaces)) {
-      for (const iface of interfaces[name]) {
+      for (const iface of interfaces[name] ?? []) {
         // Skip internal and non-IPv4 addresses
         if (iface.internal || iface.family !== 'IPv4') {
           continue;

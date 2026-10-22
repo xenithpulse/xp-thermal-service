@@ -12,7 +12,7 @@ See [install.md](install.md) to deploy, [troubleshooting.md](troubleshooting.md)
 http://127.0.0.1:<active-port>/dashboard
 ```
 
-Resolve `<active-port>` from `%ProgramData%\XPThermalService\active_port.txt` — it is **not** reliably 9100. See [install.md](install.md#read-this-first-the-dashboard-is-not-always-on-port-9100).
+The quickest way is the tray icon → **Open dashboard**. Otherwise resolve `<active-port>` from `active_port.txt` in the settings folder (`%LOCALAPPDATA%\ThermalBridge` for the app, `%ProgramData%\ThermalBridge` for a service install) — it is **not** reliably 9100. See [install.md](install.md#read-this-first-the-dashboard-is-not-always-on-port-9100).
 
 `http://127.0.0.1:<port>/` redirects to `/dashboard`. Note that the redirect **drops any query string**, which is a useful diagnostic: if a query parameter you did not type survives into the address bar, it was added by the browser or an extension, not by this service.
 
@@ -20,7 +20,9 @@ The dashboard is loopback-only and exempt from API-key checks. The service injec
 
 ---
 
-## The seven pages
+## The pages
+
+Every page starts with the status banner ("Ready to print · 2 of 2 printers online · Web apps print to http://127.0.0.1:9100", green, amber or red) and the **Detect printers** and **Print test page** buttons. Below it, anything waiting on you: a website asking to print, printers to import from XP Thermal Service, an update. The sidebar has **Overview**, **Printers**, **Jobs**, **Websites** and **Settings**; a red count on Jobs means something failed, an amber one on Websites means a site is waiting for an answer. The dashboard follows Windows light or dark mode, or pick one under Settings → General → Appearance.
 
 | Page | What it is for |
 |---|---|
@@ -28,9 +30,9 @@ The dashboard is loopback-only and exempt from API-key checks. The service injec
 | **Printers** | Discovery, role assignment, diagnosis, repair, cash drawer, test prints. |
 | **Jobs** | Individual print jobs — inspect, retry, cancel, clear failed. |
 | **Queue** | Depth, pause/resume, throughput. |
-| **Backup** | Database backup status, run a backup, restore from one. |
+| **Backup** | Pulsar POS database backups. Only shown on POS service installs. |
 | **System** | Host info, connections, metrics, service restart. |
-| **Settings** | Server config, API key, allowed origins, printer editing. |
+| **Settings** | **App** (version, Start with Windows, updates), **Websites** (allowed and blocked), Server, Security. |
 
 ---
 
@@ -46,7 +48,7 @@ Consequences worth internalising:
 
 ### Adding or replacing a printer
 
-**Printers** → **Find Printers** → **Use as Receipt** / **Use as Kitchen**. A test receipt prints automatically.
+**Detect printers** → type a name → under **Use as**, click **Receipt**, **Kitchen (KOT)**, **Bar** or **Labels**. A test receipt prints automatically.
 
 **Set Up Automatically** assigns discovered printers to open roles in one action — useful on a fresh install with one or two units, less so where role assignment matters.
 
@@ -82,19 +84,19 @@ This is deliberately **not** a liveness check. A running process with no working
 
 ---
 
-## Restarting — read this carefully
+## Restarting
 
-**`Restart-Service` does not cycle the Node child process.** The wrapper restarts; the process doing the work does not. A new build or a config change that requires a restart will appear not to take effect.
-
-Correct methods:
+The print server restarts itself if it ever exits, after 5 s, 10 s, then 30 s. To restart it deliberately:
 
 1. **System** page → restart button, or
 2. ```powershell
-   $port = (type "$env:ProgramData\XPThermalService\active_port.txt").Trim()
+   $port = (type "$env:LOCALAPPDATA\ThermalBridge\active_port.txt").Trim()
    Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/service/restart"
    ```
-   (loopback-only), or
-3. `powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Restart`
+   (loopback-only). In-flight receipts finish first, or
+3. Tray → **Quit**, then start **Thermal Bridge** from the Start Menu. For a service install, `Restart-Service ThermalBridge` restarts all three processes.
+
+The old XP Thermal Print Service is different: there, `Restart-Service` did not cycle the Node process. Use its restart endpoint or `legacy\install.ps1 -Restart`.
 
 ---
 
@@ -102,16 +104,16 @@ Correct methods:
 
 Most changes belong in the dashboard's **Settings** page, which applies them live.
 
-Editing `%ProgramData%\XPThermalService\config.json` by hand is supported — UTF-8 BOMs from Notepad are handled and rewritten out — but:
+Editing `config.json` in the settings folder by hand is supported — UTF-8 BOMs from Notepad are handled and rewritten out — but:
 
 - A config that fails to parse is **backed up as `config.corrupt.*.json` and never overwritten.** If printers "vanish", restore from that file.
 - The `metadata` block under each printer is written by the service. Do not hand-edit it; it records last-known-good USB port, driver, and hardware id.
 
 ### Allowing a POS origin
 
-Browser-based POS clients need their origin in `security.allowedOrigins`. A rejected origin returns a **403 that names the origin and how to allow it** — read the response body, it tells you exactly what to add.
+The first time a website calls the service, it appears at the top of the dashboard: *"https://pos.example.com wants to print"* with **Allow** and **Block**. Allow adds it to `security.allowedOrigins`; Block adds it to `security.blockedOrigins`, and blocked always wins. The **Websites** page lists both, can undo either, and can allow a site by hand before it has tried to print.
 
-Loopback is always allowed on any port and never needs listing.
+Until it is allowed, the site gets a **403 that names the origin** and says how to allow it. Loopback is always allowed on any port, as is the local network unless `allowPrivateNetwork` is turned off.
 
 ---
 
@@ -135,20 +137,22 @@ The **Backup** page shows status, lists available backups, and runs one on deman
 
 ## Logs
 
+Tray → **Open logs folder**, or:
+
 ```
-%ProgramData%\XPThermalService\logs\          service log
-%ProgramData%\XPThermalService\daemon\*.log   wrapper stdout/stderr
-%TEMP%\XPThermalInstall_*.log                 installer transcript
+%LOCALAPPDATA%\ThermalBridge\logs\service.log      print server (service install: %ProgramData%\ThermalBridge\logs\)
+%LOCALAPPDATA%\ThermalBridge\logs\supervisor.log   starts, restarts, standing aside for another service
+%LOCALAPPDATA%\ThermalBridge\logs\console.log      anything the server printed, including crashes before logging started
 ```
 
-Read the service log first. Go to the daemon log only when the process is failing to start at all — that is where a crash before logging initialises will surface.
+Read `service.log` first. Go to `console.log` when the server fails to start at all, and to `supervisor.log` to see how often it has been restarted.
 
 ---
 
 ## Weekly sanity check
 
 ```powershell
-$port = (type "$env:ProgramData\XPThermalService\active_port.txt").Trim()
+$port = (type "$env:LOCALAPPDATA\ThermalBridge\active_port.txt").Trim()
 $h = Invoke-RestMethod "http://127.0.0.1:$port/health"
 "status : $($h.status)"
 "reasons: $($h.reasons -join '; ')"

@@ -1,0 +1,206 @@
+/*
+ * Thermal Bridge dashboard styles. Tailwind v4 compiles this, scanning
+ * dashboard.html (markup and script), and scripts/build-dashboard.mjs inlines
+ * the result into public/dashboard.html. Nothing is fetched at runtime: the
+ * dashboard is opened on tills that are often offline.
+ *
+ * Palette: the XenithPulse family (Pulsar POS, the installer). Ink and chalk
+ * neutrals with a trace of green, and one emerald accent. Colour otherwise
+ * carries meaning only (ready, warning, fault), so a problem is the loudest
+ * thing on screen.
+ */
+
+@import "tailwindcss";
+@source "./dashboard.html";
+
+/* Dark mode follows the `dark` class, which the page sets from the saved
+   choice or, by default, the system setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  --color-brand: #34d399;
+  --color-ink: #090e0c;
+  --color-chalk: #e9f0ed;
+
+  --animate-pop: tb-pop 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  --animate-fade: tb-fade 180ms ease-out;
+  --animate-toast: tb-toast 200ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* Semantic colours, resolved per theme below, so `bg-panel` or `text-ok/80`
+   work unchanged in light and dark. */
+@theme inline {
+  --color-canvas: var(--tb-canvas);
+  --color-panel: var(--tb-panel);
+  --color-raised: var(--tb-raised);
+  --color-hover: var(--tb-hover);
+  --color-line: var(--tb-line);
+  --color-line-strong: var(--tb-line-strong);
+  --color-fg: var(--tb-fg);
+  --color-fg-2: var(--tb-fg-2);
+  --color-fg-3: var(--tb-fg-3);
+  --color-accent: var(--tb-accent);
+  --color-accent-fg: var(--tb-accent-fg);
+  --color-ok: var(--tb-ok);
+  --color-warn: var(--tb-warn);
+  --color-bad: var(--tb-bad);
+  --color-info: var(--tb-info);
+}
+
+:root {
+  --tb-canvas: #f5f7f6;
+  --tb-panel: #ffffff;
+  --tb-raised: #eef2f0;
+  --tb-hover: #f0f4f2;
+  --tb-line: #e2e8e5;
+  --tb-line-strong: #cdd6d2;
+  --tb-fg: #0b1210;
+  --tb-fg-2: #4a5a53;
+  --tb-fg-3: #7f8f88;
+  --tb-accent: #047857;
+  --tb-accent-fg: #ffffff;
+  --tb-ok: #059669;
+  --tb-warn: #b45309;
+  --tb-bad: #dc2626;
+  --tb-info: #2563eb;
+  color-scheme: light;
+}
+
+.dark {
+  --tb-canvas: #070b0a;
+  --tb-panel: #0c1311;
+  --tb-raised: #131c19;
+  --tb-hover: #16211d;
+  --tb-line: #1b2622;
+  --tb-line-strong: #293631;
+  --tb-fg: #e9f0ed;
+  --tb-fg-2: #a3b2ab;
+  --tb-fg-3: #6e7f77;
+  --tb-accent: #34d399;
+  --tb-accent-fg: #04130d;
+  --tb-ok: #34d399;
+  --tb-warn: #fbbf24;
+  --tb-bad: #f87171;
+  --tb-info: #60a5fa;
+  color-scheme: dark;
+}
+
+@keyframes tb-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+}
+@keyframes tb-fade {
+  from { opacity: 0; transform: translateY(3px); }
+}
+@keyframes tb-toast {
+  from { opacity: 0; transform: translateY(8px); }
+}
+
+@layer base {
+  html, body { height: 100%; }
+  /* Every icon. Lowest priority, so component rules such as `.btn-sm svg`
+     and size utilities both win over it. */
+  .i { width: 1rem; height: 1rem; flex-shrink: 0; }
+  /* Cascadia Mono sets large and dark beside Segoe UI; bring it into line.
+     An explicit text-* size still wins, being a utility. */
+  .font-mono { font-size: 0.92em; }
+  ::selection { background: color-mix(in oklab, var(--tb-accent) 22%, transparent); }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--tb-accent); outline-offset: 2px; }
+
+  /* Thin scrollbars that sit on either theme. */
+  * { scrollbar-width: thin; scrollbar-color: var(--tb-line-strong) transparent; }
+
+  dialog::backdrop { background: rgb(4 10 8 / 0.55); backdrop-filter: blur(3px); }
+  dialog[open] { animation: var(--animate-pop); }
+
+  .tb-instant *, .tb-instant *::before, .tb-instant *::after { transition: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after, dialog[open] { animation: none !important; transition: none !important; }
+  }
+}
+
+@layer components {
+  .card { @apply rounded-xl border border-line bg-panel shadow-[0_1px_2px_rgb(0_0_0/0.03)] dark:shadow-none; }
+  .card-head { @apply flex flex-wrap items-center justify-between gap-3 border-b border-line px-5 py-3.5; }
+  .card-title { @apply text-sm font-semibold text-fg; }
+  .card-sub { @apply mt-0.5 text-xs text-fg-3; }
+  .section-label { @apply text-[11px] font-semibold uppercase tracking-wider text-fg-3; }
+
+  .btn {
+    @apply inline-flex h-9 shrink-0 cursor-pointer select-none items-center justify-center gap-2 whitespace-nowrap rounded-lg border px-3.5 text-[13px] font-medium transition-colors duration-150 disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn svg { @apply size-4 shrink-0; }
+  .btn-primary { @apply border-transparent bg-accent text-accent-fg shadow-sm hover:bg-accent/90; }
+  .btn-secondary { @apply border-line-strong bg-panel text-fg hover:bg-hover; }
+  .btn-ghost { @apply border-transparent bg-transparent text-fg-2 hover:bg-hover hover:text-fg; }
+  .btn-danger { @apply border-line-strong bg-panel text-bad hover:border-bad/40 hover:bg-bad/10; }
+  .btn-destructive { @apply border-transparent bg-bad text-white shadow-sm hover:bg-bad/90; }
+  .btn-sm { @apply h-8 gap-1.5 rounded-md px-2.5 text-xs; }
+  .btn-sm svg { @apply size-3.5; }
+  .btn-icon { @apply w-9 px-0; }
+  .btn-sm.btn-icon { @apply w-8 px-0; }
+
+  .input {
+    @apply block h-9 w-full rounded-lg border border-line-strong bg-panel px-3 text-[13px] text-fg shadow-xs transition placeholder:text-fg-3 focus:border-accent focus:ring-3 focus:ring-accent/15 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  select.input { @apply pr-8; }
+  .label { @apply mb-1.5 block text-xs font-medium text-fg-2; }
+  .hint { @apply mt-1.5 text-xs leading-relaxed text-fg-3; }
+  .check { @apply size-4 cursor-pointer rounded border-line-strong accent-[var(--tb-accent)]; }
+
+  .badge { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset; }
+  .badge::before { content: ""; @apply size-1.5 rounded-full bg-current; }
+  .badge-ok { @apply bg-ok/10 text-ok ring-ok/25; }
+  .badge-warn { @apply bg-warn/10 text-warn ring-warn/25; }
+  .badge-bad { @apply bg-bad/10 text-bad ring-bad/25; }
+  .badge-info { @apply bg-info/10 text-info ring-info/25; }
+  .badge-neutral { @apply bg-raised text-fg-2 ring-line-strong; }
+  .chip { @apply inline-flex items-center rounded-md bg-raised px-2 py-0.5 text-[11px] font-medium text-fg-2; }
+
+  .tbl { @apply w-full border-collapse text-[13px]; }
+  .tbl th { @apply border-b border-line bg-raised/50 px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-fg-3; }
+  .tbl td { @apply border-b border-line px-5 py-3 align-middle; }
+  .tbl tbody tr:last-child td { @apply border-b-0; }
+  .tbl tbody tr { @apply transition-colors hover:bg-hover/60; }
+
+  .seg { @apply inline-flex flex-wrap gap-1 rounded-lg border border-line bg-raised p-1; }
+  .seg-item { @apply inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-3 text-xs font-medium text-fg-2 transition-colors hover:text-fg; }
+  .seg-item svg { @apply size-3.5 opacity-80; }
+  .seg-item[aria-selected="true"] { @apply bg-panel text-fg shadow-sm ring-1 ring-line-strong dark:bg-line-strong; }
+
+  .nav-item { @apply relative flex h-9 w-full cursor-pointer items-center gap-3 rounded-lg px-3 text-[13px] font-medium text-fg-2 transition-colors hover:bg-hover hover:text-fg; }
+  .nav-item svg { @apply size-[18px] shrink-0 opacity-70; }
+  .nav-item[aria-current="page"] { @apply bg-accent/10 text-fg; }
+  .nav-item[aria-current="page"] svg { @apply text-accent opacity-100; }
+  .nav-item[aria-current="page"]::before { content: ""; @apply absolute top-2 bottom-2 -left-3 w-[3px] rounded-r-full bg-accent; }
+  .nav-count { @apply ml-auto min-w-5 rounded-full px-1.5 text-center text-[10px] leading-5 font-semibold; }
+
+  .callout { @apply flex gap-3 rounded-lg border px-4 py-3 text-[13px]; }
+  .callout > :first-child { @apply mt-0.5 shrink-0; }
+  .callout-ok { @apply border-ok/25 bg-ok/[0.06]; }
+  .callout-warn { @apply border-warn/30 bg-warn/[0.07]; }
+  .callout-bad { @apply border-bad/30 bg-bad/[0.06]; }
+  .callout-info { @apply border-line bg-raised/50; }
+
+  .dlg { @apply m-auto max-h-[88vh] w-[calc(100%-2rem)] max-w-xl overflow-hidden rounded-2xl border border-line bg-panel p-0 text-fg shadow-2xl; }
+  .dlg-head { @apply flex items-start justify-between gap-4 border-b border-line px-6 py-4; }
+  .dlg-body { @apply max-h-[calc(88vh-8.5rem)] overflow-y-auto px-6 py-5; }
+  .dlg-foot { @apply flex flex-wrap items-center justify-end gap-2 border-t border-line bg-raised/40 px-6 py-3.5; }
+
+  .switch { @apply relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center; }
+  .switch input { @apply absolute inset-0 z-10 size-full cursor-pointer opacity-0; }
+  .switch span { @apply pointer-events-none absolute inset-0 rounded-full bg-line-strong transition-colors; }
+  .switch span::after { content: ""; @apply absolute top-0.5 left-0.5 size-4 rounded-full bg-white shadow transition-transform; }
+  .switch input:checked + span { @apply bg-accent; }
+  .switch input:checked + span::after { @apply translate-x-4; }
+  .switch input:focus-visible + span { @apply ring-3 ring-accent/30; }
+
+  .menu { @apply absolute right-0 z-20 mt-1 min-w-44 overflow-hidden rounded-lg border border-line bg-panel p-1 shadow-lg; }
+  .menu-item { @apply flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg-2 hover:bg-hover hover:text-fg; }
+  .menu-item svg { @apply size-4 opacity-70; }
+}

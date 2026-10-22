@@ -1,22 +1,24 @@
 <div align="center">
 
-# XP Thermal Service
+<img src="assets/icon.png" alt="" width="72">
 
-**Free, open-source thermal printing for web POS apps. A zero-fee alternative to QZ Tray.**
+# Thermal Bridge
 
-Print receipts, kitchen tickets (KOT), barcodes and QR codes from any browser app to USB or network ESC/POS printers, through a self-healing Windows service.
+**Silent receipt printing for web apps.**
+
+Formerly XP Thermal Service
+
+Print receipts, kitchen tickets (KOT), barcodes and QR codes from any browser app to USB or network ESC/POS printers, with no print dialog. One installer, no Node.js, no admin rights.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Windows%207%20%7C%2010%20%7C%2011-blue)
-![Node](https://img.shields.io/badge/node-18%2B-brightgreen)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20(x64)-blue)
 [![Latest release](https://img.shields.io/github/v/release/xenithpulse/xp-thermal-service)](https://github.com/xenithpulse/xp-thermal-service/releases/latest)
 
-[**Download**](https://github.com/xenithpulse/xp-thermal-service/releases/latest) · [Product page](https://xenithpulse.com/products/thermal-printer-service) · [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos) · [Need integration help?](https://wa.me/97455911793?text=XP%20Thermal%20Service%20integration)
+[**Download ThermalBridge-Setup.exe**](https://github.com/xenithpulse/xp-thermal-service/releases/latest/download/ThermalBridge-Setup.exe) · [Product page](https://xenithpulse.com/products/thermal-bridge) · [Pulsar Restaurant POS](https://xenithpulse.com/products/restaurant-pos) · [Need integration help?](https://wa.me/97455911793?text=Thermal%20Bridge%20integration)
 
-<!-- Add these two images to a /docs folder in the repo -->
-<img src="docs/dashboard.png" alt="XP Thermal Service web dashboard" width="720">
+<img src="docs/dashboard.png" alt="Thermal Bridge dashboard" width="720">
 
-<img src="docs/receipt.jpg" alt="Receipt and KOT printed with XP Thermal Service" width="720">
+<img src="docs/receipt.jpg" alt="Receipt and KOT printed with Thermal Bridge" width="720">
 
 </div>
 
@@ -24,54 +26,36 @@ Print receipts, kitchen tickets (KOT), barcodes and QR codes from any browser ap
 
 ## Why this exists
 
-Browsers can't talk to thermal printers directly, so most web POS systems rely on QZ Tray and pay a licence per deployment. We needed reliable printing for our own [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos), so we built a production-grade service and open-sourced it.
+Browsers can't talk to thermal printers directly, so most web POS systems rely on QZ Tray. QZ Tray is open source (LGPL), but printing silently, without a trust prompt on every job, needs its Premium Support certificate. We needed reliable printing for our own [Pulsar Restaurant POS](https://xenithpulse.com/products/restaurant-pos), so we built Thermal Bridge and open-sourced it.
 
-| | XP Thermal Service | QZ Tray |
+| | Thermal Bridge | QZ Tray |
 | --- | --- | --- |
-| Silent printing (no trust warnings) | Free | Requires Premium Support certificate ($599/year) |
+| Silent printing (no trust prompts) | Free | Needs the Premium Support certificate ($599/year) |
 | Licence | MIT | LGPL 2.1 |
-| Install | One-click `setup.bat` | Desktop installer + certificate signing setup |
-| Runs as | Self-healing Windows service | Tray app |
+| Install | One installer, no admin, no Node.js | Desktop installer + certificate signing setup |
+| Runs as | Tray app with a self-healing print server, or a Windows service | Tray app |
 | Built-in receipt/KOT templates | Yes, send JSON | No, you build the print data |
 
 <sub>QZ Tray pricing from buy.qz.io as of October 2026; verify current terms with QZ.</sub>
 
-## Built into XP Restaurant POS
+## Built into Pulsar Restaurant POS
 
-XP Thermal Service ships **built in** with [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos). It installs as one of the POS's Windows services and handles receipts, KOTs and the cash drawer out of the box, with no extra setup.
+Thermal Bridge ships **built in** with [Pulsar Restaurant POS](https://xenithpulse.com/products/restaurant-pos). It installs as one of the POS's Windows services and handles receipts, KOTs and the cash drawer out of the box, with no extra setup.
 
-Want the whole system instead of building your own? **XP Restaurant POS is $299 once, with no subscription and unlimited tills.** [See the POS →](https://xenithpulse.com/products/restaurant-pos)
+Want the whole system instead of building your own? **Pulsar Restaurant POS is $299 once, with no subscription and unlimited tills.** [See the POS →](https://xenithpulse.com/products/restaurant-pos)
 
-Building your own POS? Use this service standalone. It works with any web app that can send an HTTP request.
-
-## Features
-
-- **Bulletproof Installation**: One-click `setup.bat` with pre-flight checks, retry logic, and automatic recovery
-- **Self-Healing Service**: Auto-restart on crash (5s/10s/30s delays), watchdog every 5 minutes, delayed auto-start on boot
-- **Multiple Printers**: Support for USB and network thermal printers with auto-discovery
-- **ESC/POS Support**: Full ESC/POS command support including barcodes, QR codes, and formatting
-- **Templates**: Built-in templates for receipts, KOT, invoices, labels, test pages, and raw ESC/POS
-- **Secure API**: Localhost-only binding, CORS protection, Chrome Private Network Access (PNA) support, rate limiting with burst protection
-- **Smart Port Handling**: Automatic port fallback (9100–9110) if primary port is busy
-- **Job Persistence**: SQLite-backed queue with crash recovery and automatic database repair
-- **Idempotent**: Duplicate job prevention with idempotency keys
-- **Queue Management**: Priority queuing, concurrent job processing, pause/resume
-- **Health Monitoring**: Always-healthy liveness endpoint (only degrades during USB scanning), metrics, and dashboard
-- **Config Auto-Recovery**: Corrupt config.json is backed up and rebuilt from example automatically
+Building your own POS? Use Thermal Bridge standalone. It works with any web app that can send an HTTP request.
 
 ## Quick Start
 
-### One-Click Install (Recommended)
+1. **Download** [`ThermalBridge-Setup.exe`](https://github.com/xenithpulse/xp-thermal-service/releases/latest/download/ThermalBridge-Setup.exe) from Releases.
+2. **Double-click** it. There is no admin prompt; it installs for your Windows user and opens the dashboard.
+3. Click **Detect printers**, type a name for your printer and choose what it is for (Receipt, Kitchen, Label).
+4. Click **Print test page**.
 
-1. Download the latest zip from [**Releases**](https://github.com/xenithpulse/xp-thermal-service/releases/latest) and extract it.
-2. Right-click `setup.bat` → **Run as administrator**. It will:
-   1. Check for Node.js 18+
-   2. Install dependencies
-   3. Build the TypeScript project
-   4. Create `config.json` from example if missing
-   5. Install as a Windows service with auto-start
-   6. Open the dashboard in your browser
-3. Send a test print from the dashboard at `http://localhost:9100/dashboard`.
+No Node.js, no admin rights, no terminal. Thermal Bridge then sits in the system tray and starts with Windows.
+
+Prefer not to install? `ThermalBridge-Portable-<version>.exe` from the same release runs from any folder or a USB stick.
 
 ### Your first print
 
@@ -95,66 +79,44 @@ await fetch("http://localhost:9100/api/print", {
 });
 ```
 
-### Manual Installation
+Two things decide whether a website may print:
 
-```bash
-# Clone the repository
-git clone https://github.com/xenithpulse/xp-thermal-service.git
-cd xp-thermal-service
+- **Its origin.** Pages on this computer (`localhost`) and on your local network can print straight away. Any other website, such as `https://your-pos.example.com`, appears at the top of the dashboard the first time it tries: *"https://your-pos.example.com wants to print — Allow / Block"*. Nobody has to edit `config.json`.
+- **The API key**, when it is enabled (it is by default). Fetch it once from `GET /api/auth/local-token`, which only answers this computer, and send it as `X-API-Key`. See [docs/web-integration.md](docs/web-integration.md).
 
-# Install dependencies
-npm install
+The service picks the first free port from 9100, so look it up rather than assuming 9100: probe `http://127.0.0.1:9100–9110/health` for `"service": "xp-thermal-service"`, or read `active_port.txt` (see [Where things live](#where-things-live)).
 
-# Copy and configure
-cp config.example.json config.json
-# Edit config.json with your printer settings
+## Features
 
-# Build
-npm run build
+- **One-file install**: a per-user installer with no UAC prompt, or a portable exe. The Node.js runtime is built in.
+- **Self-healing**: a small supervisor restarts the print server after 5s, 10s, then 30s if it ever exits; queued jobs survive crashes and reboots
+- **Tray icon**: open the dashboard, print a test page, see which printers are online, turn Start with Windows on or off
+- **Multiple printers**: USB (through the Windows spooler, any driver) and network printers, with detection of both
+- **ESC/POS**: barcodes, QR codes, formatting, cash drawer pulses
+- **Templates**: receipts, KOT, invoices, labels, test pages, and raw ESC/POS
+- **Website pairing**: unknown websites are offered to the operator with Allow / Block
+- **Secure by default**: listens on `127.0.0.1` only, CORS and host checks, API key, Chrome Private Network Access, rate limiting
+- **Smart port handling**: falls back from 9100 to the next free port and tells clients where it landed
+- **Job persistence**: SQLite-backed queue with idempotency keys, retries with backoff, and automatic database repair
+- **Updates you control**: "Check for updates" verifies the download's SHA-256 and Authenticode signature, then offers to run the installer
+- **Windows service mode** for POS and fleet installs: `ThermalBridge.exe --install-service`
 
-# Start (foreground)
-npm start
-```
+## Where things live
 
-### As a Windows Service
+| | Installed app | Windows service |
+| --- | --- | --- |
+| Program | `%LOCALAPPDATA%\Programs\ThermalBridge\ThermalBridge.exe` | `%ProgramFiles%\ThermalBridge\` |
+| Settings (`config.json`) | `%LOCALAPPDATA%\ThermalBridge\` | `%ProgramData%\ThermalBridge\` |
+| Print history (`data\jobs.db`) | `%LOCALAPPDATA%\ThermalBridge\data\` | `%ProgramData%\ThermalBridge\data\` |
+| Logs | `%LOCALAPPDATA%\ThermalBridge\logs\` (tray → *Open logs folder*) | `%ProgramData%\ThermalBridge\logs\` |
+| Active port | `%LOCALAPPDATA%\ThermalBridge\active_port.txt` | `%ProgramData%\ThermalBridge\active_port.txt`, and `%ProgramData%\XPThermalService\active_port.txt` for older POS builds |
+| Starts with Windows | `HKCU\...\Run\ThermalBridge` (toggle in tray or dashboard) | Service, delayed automatic start |
 
-```bash
-# Install as Windows service (requires Administrator)
-npm run service:install
+The portable exe uses the same settings folder as the installed app.
 
-# Start the service
-npm run service:start
+## Moving from XP Thermal Service
 
-# Stop the service
-npm run service:stop
-
-# Uninstall
-npm run service:uninstall
-```
-
-### PowerShell Installer (Advanced)
-
-```powershell
-# Install (Run PowerShell as Administrator)
-.\scripts\install.ps1
-
-# Repair (reinstall without losing config)
-.\scripts\install.ps1 -Repair
-
-# Start / Stop / Restart
-.\scripts\install.ps1 -Start
-.\scripts\install.ps1 -Stop
-.\scripts\install.ps1 -Restart
-
-# Uninstall
-.\scripts\install.ps1 -Uninstall
-
-# Silent install (no console output)
-.\scripts\install.ps1 -Silent
-
-# Custom config file
-.\scripts\install.ps1 -ConfigPath "C:\path\to\config.json"
-```
+If the old XP Thermal Print Service is installed and running, Thermal Bridge leaves printing to it and says so in the tray, so the two never fight over printers. The dashboard offers to **import your printers** from `C:\ProgramData\XPThermalService\config.json`. When you are ready, remove the old service from Windows Services (or run `legacy\uninstall.bat` as Administrator); Thermal Bridge notices within a few minutes and takes over. See [legacy/README.md](legacy/README.md).
 
 ## API Reference
 
@@ -164,19 +126,25 @@ npm run service:uninstall
 GET http://localhost:9100/health
 ```
 
-Response (always HTTP 200 unless actively scanning USB ports):
+Response:
 
 ```json
 {
   "status": "healthy",
+  "reasons": [],
   "uptime": 3600000,
-  "version": "1.0.0",
-  "printers": { "total": 2, "online": 1, "offline": 1, "initializing": false },
-  "queue": { "pending": 0, "processing": 0, "failed": 0 }
+  "version": "3.0.1",
+  "printers": { "total": 2, "online": 2, "offline": 0, "error": 0, "initializing": false },
+  "queue": { "pending": 0, "processing": 0, "failed": 0, "deadLetter": 0, "oldestPendingAgeMs": null },
+  "service": "xp-thermal-service",
+  "name": "Thermal Bridge",
+  "mode": "user",
+  "port": 9100,
+  "configuredPort": 9100
 }
 ```
 
-> **Note:** The health endpoint returns `"status": "healthy"` even when printers are offline, since printers being offline is normal. It only returns `"status": "initializing"` during active USB port scanning at startup.
+> `status` is `healthy`, `degraded` or `unhealthy`, and `reasons` says why in plain words. `service` is always `xp-thermal-service`, which is what clients match on; `name` and `mode` (`user`, `service` or `legacy`) were added in 3.0.
 
 ### Print a Receipt
 
@@ -306,96 +274,39 @@ Web-based dashboard for monitoring printers, queue, jobs, and managing configura
 
 ## Configuration
 
-The service uses `config.json` in the project root. Copy `config.example.json` to get started:
+Everything an operator needs is in the dashboard: printers are added with **Detect printers**, websites are approved with **Allow**, and Start with Windows is a checkbox. `config.json` (in the settings folder above) is still there for automation and support. It is created on first run from [config.example.json](config.example.json), which ships with no printers and allows only `http://localhost:3000` and `http://127.0.0.1:3000` beyond the always-trusted loopback and local network.
 
 ```json
 {
-  "server": {
-    "host": "127.0.0.1",
-    "port": 9100,
-    "enableHttps": false
-  },
+  "server": { "host": "127.0.0.1", "port": 9100 },
   "security": {
-    "allowedOrigins": [
-      "http://localhost:3000",
-      "http://127.0.0.1:3000"
-    ],
-    "allowedHosts": ["localhost", "127.0.0.1"],
-    "rateLimitPerMinute": 120,
-    "enableApiKey": false,
-    "maxPayloadSize": 1048576
-  },
-  "queue": {
-    "maxConcurrentJobs": 3,
-    "maxRetries": 5,
-    "retryDelayMs": 1000,
-    "retryBackoffMultiplier": 2,
-    "maxRetryDelayMs": 60000,
-    "jobTimeoutMs": 30000,
-    "cleanupIntervalMs": 3600000,
-    "maxJobAgeMs": 604800000,
-    "persistPath": "./data/jobs.db"
-  },
-  "logging": {
-    "level": "info",
-    "file": "./logs/service.log",
-    "console": true
+    "allowedOrigins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+    "blockedOrigins": [],
+    "enableApiKey": true,
+    "rateLimitPerMinute": 120
   },
   "printers": [
     {
-      "id": "cashier",
-      "name": "Cashier Receipt Printer",
-      "type": "network",
-      "enabled": true,
-      "isDefault": true,
-      "host": "192.168.1.101",
-      "port": 9100,
-      "timeout": 10000,
-      "maxRetries": 3,
-      "capabilities": {
-        "maxWidth": 48,
-        "supportsBold": true,
-        "supportsUnderline": true,
-        "supportsBarcode": true,
-        "supportsQRCode": true,
-        "supportsImage": false,
-        "supportsCut": true,
-        "supportsPartialCut": true,
-        "supportsCashDrawer": true,
-        "supportsDensity": true,
-        "codepage": 0
-      }
+      "id": "receipt",
+      "name": "Front counter",
+      "type": "usb",
+      "printerName": "Generic / Text Only",
+      "isDefault": true
     },
     {
-      "id": "usb-receipt",
-      "name": "USB Receipt Printer",
-      "type": "usb",
-      "enabled": false,
-      "isDefault": false,
-      "printerName": "XP-80C",
-      "timeout": 10000,
-      "maxRetries": 3,
-      "capabilities": {
-        "maxWidth": 48,
-        "supportsBold": true,
-        "supportsUnderline": true,
-        "supportsBarcode": true,
-        "supportsQRCode": true,
-        "supportsImage": false,
-        "supportsCut": true,
-        "supportsPartialCut": false,
-        "supportsCashDrawer": true,
-        "supportsDensity": true,
-        "codepage": 0
-      }
+      "id": "kitchen",
+      "name": "Kitchen",
+      "type": "network",
+      "host": "192.168.1.100",
+      "port": 9100
     }
   ]
 }
 ```
 
-> **Allowed origins:** add the exact URL of your POS (e.g. `https://your-pos.example.com`) to `security.allowedOrigins`. Avoid `"*"` in production: it lets any website you visit send jobs to your printer.
+> **Allowed origins:** prefer the dashboard's Allow / Block prompt. If you list origins by hand, use exact URLs (or wildcards such as `https://*.example.com`) and avoid `"*"`: it lets any website you visit send jobs to your printer.
 
-> **Note for USB printers:** Set `printerName` to match your Windows printer name exactly as shown in Control Panel > Devices and Printers.
+> **USB printers:** `printerName` is the Windows printer name, exactly as shown in *Settings → Printers & scanners*. Detect printers fills it in for you.
 
 ## Template Types
 
@@ -446,7 +357,7 @@ export async function checkPrintStatus(jobId: string) {
 }
 ```
 
-> **Chrome Private Network Access:** The service includes PNA headers (`Access-Control-Allow-Private-Network: true`) so public websites (e.g., deployed on Vercel) can call `localhost` without CORS errors in Chrome.
+> **Chrome Private Network Access:** The service includes PNA headers (`Access-Control-Allow-Private-Network: true`) so a POS website hosted on the internet can call `localhost` without CORS errors in Chrome.
 
 ## Error Handling
 
@@ -484,85 +395,56 @@ pending → queued → processing → printing → completed
 | `dead_letter`     | Failed after max retries                |
 | `cancelled`       | Cancelled by user                       |
 
-## Development
+## Build from source
+
+Developers only; restaurant owners should use the installer above.
 
 ```bash
-npm run dev     # Development mode (ts-node)
-npm run build   # Build TypeScript
-npm start       # Start production
-npm test        # Run tests
-npm run lint    # Lint
-npm run cli     # CLI tool
+git clone https://github.com/xenithpulse/xp-thermal-service.git
+cd xp-thermal-service
+npm ci
+
+npm run dev        # run the print server from source (ts-node), in the foreground
+npm run app        # run the full app (supervisor, tray, server) from the bundled JS
+npm run dev:dashboard  # rebuild the dashboard (src/dashboard/, Tailwind CSS) on every save
+npm test           # unit tests
+npm run lint
+npm run build:exe  # build release/ThermalBridge-Setup-<v>.exe, ThermalBridge-Setup.exe, ThermalBridge-Portable-<v>.exe
 ```
+
+Building the exe needs Windows 10/11 x64 and Node.js 20 or newer, nothing else: the installer is built from `installer/` with the C# compiler that ships with Windows, and the build downloads the Node 22 runtime it embeds. [docs/BUILD.md](docs/BUILD.md) explains the build, the native-module decisions, code signing, and how releases reach GitHub and the update channel.
+
+`npm run build` still produces `dist/index.js`, which runs the print server under a plain `node` (this is how Pulsar POS's own installer bundles it today).
 
 ## System Requirements
 
-- **Node.js** 18+ (tested up to v25)
-- **Windows** 7/10/11
-- **Disk space**: 200MB minimum
-- USB drivers for USB printers
+- **Windows 10 or 11, x64.** Windows 7 and 8.1 are not supported: the built-in Node.js 22 runtime requires Windows 10 or Server 2016 or later.
+- About 250 MB of disk space
+- A Windows driver for USB printers (`Generic / Text Only` works for most ESC/POS printers)
 - Network access for LAN printers
 
-## Deployment to Client PCs
+## Windows service mode (POS and fleet installs)
 
-### One-Click Setup
+The installer above needs no admin rights because Thermal Bridge runs as a per-user background app. An installer that is already elevated, such as Pulsar POS's, can instead register it as a Windows service:
 
-1. Copy the project folder to the client PC
-2. Right-click `setup.bat` → **Run as administrator**
-3. Done. The service is installed, running, and will auto-start on every boot
-
-### What the Installer Does
-
-The PowerShell installer (`scripts/install.ps1`) performs:
-
-1. **Pre-flight checks**: Admin rights, Node.js 18+, disk space (200MB), Windows version
-2. **Cleanup**: Stops and removes any previous service installations (including legacy names)
-3. **File deployment**: Copies dist, node_modules, public, config to `C:\ProgramData\XPThermalService`
-4. **Config management**: Backs up existing config, restores from backup if missing, creates from example as fallback
-5. **Port discovery**: Finds an available port in range 9100–9110
-6. **Service registration**: Registers via `node-windows` with `sc.exe` fallback
-7. **Recovery configuration**: Auto-restart on failure after 5s, 10s, 30s; delayed auto-start on boot
-8. **Watchdog**: Scheduled task running every 5 minutes under SYSTEM account to ensure the service stays alive
-9. **Health verification**: Waits up to 105s for service process + HTTP health endpoint
-
-### Service Management
-
-```powershell
-Get-Service "XP Thermal Print Service"   # Check status
-.\scripts\install.ps1 -Start
-.\scripts\install.ps1 -Stop
-.\scripts\install.ps1 -Restart
-.\scripts\install.ps1 -Repair             # Reinstall without losing config/data
-.\scripts\install.ps1 -Uninstall
+```bat
+ThermalBridge.exe --install-service      :: needs an elevated prompt; prints a clear error otherwise
+ThermalBridge.exe --uninstall-service
 ```
 
-### Auto-Start & Self-Healing
-
-- **Delayed auto-start** on Windows boot
-- **Windows Service Recovery**: Restarts after 5s, 10s, 30s on failure
-- **Watchdog**: Scheduled task checks every 5 minutes, restarts if stopped
-- **Active port file**: Written to `C:\ProgramData\XPThermalService\active_port.txt` and `C:\ProgramData\XPThermalService\data\active_port.txt` for external discovery
-
-### Installation Logs
-
-- **Install log**: `%TEMP%\XPThermalInstall_<timestamp>.log`
-- **Service logs**: `C:\ProgramData\XPThermalService\logs\`
-- **Watchdog log**: `C:\ProgramData\XPThermalService\logs\watchdog.log`
-- **Config backups**: `C:\ProgramData\XPThermalService\backups\`
+The service is named `ThermalBridge` (display name *Thermal Bridge*), keeps its data in `%ProgramData%\ThermalBridge`, and exposes the same API, port range and `active_port.txt` discovery. See [docs/SERVICE-MODE.md](docs/SERVICE-MODE.md).
 
 ## Smart Port Handling
 
-The service uses smart port allocation across the range **9100–9110**:
+1. **Service side**: if port 9100 is in use, it takes 9101, 9102 and so on (up to 9109).
+2. **Client side**: clients probe 9100–9110 and accept the one answering `/health` with `"service": "xp-thermal-service"`.
+3. **Port file**: the active port is written to `active_port.txt` (see [Where things live](#where-things-live)).
 
-1. **Service side**: If port 9100 is in use, automatically tries 9101, 9102, etc.
-2. **Client side**: The ThermalPrintAdapter scans ports 9100–9109 to find the service
-3. **Port persistence**: The active port is written to `active_port.txt` and cached in the client's localStorage
+This keeps clients connected when another program holds 9100, which is common: 9100 is also the standard raw printing port.
 
-This keeps the POS connected if another application is using port 9100, the service restarts on a different port, or the port changes after a Windows update.
+## Connecting from Pulsar Restaurant POS
 
-## Connecting from XP Restaurant POS
-
-XP Restaurant POS connects automatically through its built-in `ThermalPrintAdapter`. The snippet below shows how the adapter works if you're building something similar.
+Pulsar Restaurant POS connects automatically through its built-in `ThermalPrintAdapter`. The snippet below shows how the adapter works if you're building something similar.
 
 ```ts
 import { getThermalAdapter, ThermalPrintService } from './printing-facility';
@@ -587,7 +469,7 @@ if (printService.isConnected()) {
 }
 ```
 
-The adapter caches the last successful port in localStorage, probes it first on reconnection, scans 9100–9109 if it fails, and retries with exponential backoff.
+The adapter caches the last successful port in localStorage, probes it first on reconnection, scans the port range if it fails, and retries with exponential backoff.
 
 ```ts
 await printService.reconnect();              // Force reconnect with port re-discovery
@@ -596,91 +478,70 @@ console.log(printService.getServiceUrl());   // Current service URL (for debuggi
 
 ## Troubleshooting
 
-### Service Won't Start
+### Nothing prints
 
-1. Check logs: `C:\ProgramData\XPThermalService\logs\`
-2. Verify Node.js is in PATH: `node --version`
-3. Check Windows Event Viewer → Application logs
-4. Try repairing: `.\scripts\install.ps1 -Repair`
-5. Check install log: `%TEMP%\XPThermalInstall_*.log`
+1. Open the dashboard (tray icon → **Open dashboard**). The banner at the top says whether printing works and why not.
+2. Click **Print test page**.
+3. For USB printers, check the printer appears in Windows *Settings → Printers & scanners*. Thermal Bridge prints through the Windows spooler.
+4. For network printers, check the IP address and that the PC and printer are on the same network.
 
-### POS Can't Connect
+### A website can't print
 
-1. Verify service is running: `Get-Service "XP Thermal Print Service"`
-2. Check the active port: `type C:\ProgramData\XPThermalService\active_port.txt`
-3. Test health endpoint: `curl http://127.0.0.1:9100/health`
-4. Check dashboard: `http://127.0.0.1:9100/dashboard`
-5. Check CORS: Ensure your POS origin is in `security.allowedOrigins`
+1. Look at the top of the dashboard for *"… wants to print"* and click **Allow**.
+2. Make sure the site sends the `X-API-Key` header (from `/api/auth/local-token`).
+3. Check the port: `curl http://127.0.0.1:9100/health`, then 9101, 9102…
 
-### Printer Not Printing
+### Common issues
 
-1. Verify printer is online in the dashboard
-2. Send a test print from the dashboard
-3. Check if `printerName` matches the Windows printer name exactly (for USB printers)
-4. For network printers, verify IP and port are reachable
+| Issue | Solution |
+| --- | --- |
+| Windows says "Windows protected your PC" | The download is not code-signed yet. Click *More info → Run anyway*, or verify it against `SHA256SUMS.txt` from the release |
+| Port 9100 in use | Normal. Thermal Bridge moves to 9101+; check `active_port.txt` or the dashboard banner |
+| Tray says "Installed service is printing" | The old XP Thermal Print Service or a Thermal Bridge service already prints on this PC. See [Moving from XP Thermal Service](#moving-from-xp-thermal-service) |
+| Printing stopped after a crash | It restarts itself within 5–30 seconds; jobs queued before the crash still print. Logs: tray → *Open logs folder* (`supervisor.log`, `service.log`) |
+| Config file damaged | Detected at startup, backed up as `config.corrupt.<time>.json`, and rebuilt from the example |
+| Database corruption | Detected and rebuilt on startup; the old database is backed up |
 
-### Common Issues
-
-| Issue                            | Solution                                                                           |
-| -------------------------------- | ---------------------------------------------------------------------------------- |
-| Port 9100 in use                 | Service auto-switches to 9101–9110; check `active_port.txt` for actual port        |
-| Service crashes on boot          | Check logs for config.json syntax errors; installer auto-repairs corrupt configs   |
-| CORS errors in Chrome            | Add your POS URL to `security.allowedOrigins`; PNA headers are included            |
-| Two services running             | Run `.\scripts\install.ps1 -Repair`; the installer cleans up legacy service names  |
-| Health check says "initializing" | Normal during USB port scanning at startup; wait a few seconds                     |
-| Service stops after manual start | Check for port conflicts or config errors in logs                                  |
-| Database corruption              | Automatically detected and rebuilt on startup; old DB backed up                    |
+More in [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Security
 
-- **Localhost binding**: Service binds to `127.0.0.1` by default and is not reachable from the network
-- **CORS**: Configurable allowed origins; supports Chrome Private Network Access (PNA)
-- **Helmet**: Security headers via `helmet` middleware
-- **Rate limiting**: 120 req/min default + burst limiter (20 req/sec)
-- **API key**: Optional `X-API-Key` header authentication
-- **Host validation**: Only `localhost` and `127.0.0.1` accepted by default
-- **Payload size limit**: 1MB default (`maxPayloadSize`)
-- **Request timeout**: 30s per request
-- **Input validation**: Request bodies validated with Zod schemas
+- **Localhost only**: binds to `127.0.0.1`, so nothing on the network can reach it, and Windows Firewall never asks
+- **Origins**: loopback and local network allowed; other websites only after the operator clicks Allow; Block always wins
+- **API key**: `X-API-Key`, generated on first run, handed out only to callers on this computer
+- **Host validation, rate limiting** (120/min plus a burst limit), **payload limit** (1 MB), **request timeout** (30 s), **Helmet** headers, **Zod** validation
+- **No telemetry**: the only outbound requests are the ones you trigger with *Check for updates*
+- **Updates**: SHA-256 from the manifest, and an Authenticode signature from XenithPulse, are both checked before an installer is offered
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Windows Service                    │
-│                (node-windows daemon)                 │
-├─────────────────────────────────────────────────────┤
-│  Express API Server (localhost:9100-9110)            │
-│  ├── Helmet + CORS + PNA + Rate Limiter             │
-│  ├── /health, /dashboard                            │
-│  ├── /api/print, /api/jobs, /api/printers           │
-│  └── /api/config, /api/metrics, /api/system         │
-├─────────────────────────────────────────────────────┤
-│  Job Queue (SQLite persistence via sql.js)           │
-│  ├── Priority queue with concurrent processing      │
-│  ├── Idempotency key deduplication                  │
-│  └── Retry with exponential backoff                 │
-├─────────────────────────────────────────────────────┤
-│  Template Engine                                     │
-│  ├── Receipt, KOT, Invoice, Label, Test, Raw        │
-│  └── ESC/POS command builder                        │
-├─────────────────────────────────────────────────────┤
-│  Printer Manager                                     │
-│  ├── USB Adapter (Windows print spooler)            │
-│  ├── Network Adapter (TCP socket)                   │
-│  └── Auto-reconnect + health checks                 │
-└─────────────────────────────────────────────────────┘
+ThermalBridge.exe (supervisor)                one per Windows user; named-pipe single instance
+├── ThermalBridgeTray.exe                      tray icon, ~15 KB, exits with the supervisor
+└── ThermalBridge.exe --server                 restarted after 5s / 10s / 30s if it exits
+    ├── Express API on 127.0.0.1:9100–9109
+    │   ├── Helmet + CORS + PNA + origin pairing + rate limiter
+    │   ├── /health, /dashboard
+    │   ├── /api/print, /api/jobs, /api/printers
+    │   └── /api/config, /api/metrics, /api/system, /api/app, /api/origins
+    ├── Job queue (SQLite via sql.js WebAssembly, persisted to data\jobs.db)
+    ├── Template engine (receipt, KOT, invoice, label, test, raw → ESC/POS)
+    └── Printer manager
+        ├── USB: Windows spooler, RAW datatype (no native modules)
+        └── Network: TCP socket to port 9100
+
+Service mode: ThermalBridgeService.exe (Windows service) → ThermalBridge.exe --service → --server
 ```
 
 ## Commercial support
 
-XP Thermal Service is free forever. If you'd rather not wire it up yourself, XenithPulse offers:
+Thermal Bridge is free forever. If you'd rather not wire it up yourself, XenithPulse offers:
 
 - **Integration** into your existing POS or web app
 - **Custom templates** for your receipt, KOT or label layouts
-- **A complete POS**: [XP Restaurant POS](https://xenithpulse.com/products/restaurant-pos), with thermal printing built in, for $299 once
+- **A complete POS**: [Pulsar Restaurant POS](https://xenithpulse.com/products/restaurant-pos), with thermal printing built in, for $299 once
 
-[Message us on WhatsApp](https://wa.me/97455911793?text=XP%20Thermal%20Service%20integration) · [xenithpulse.com](https://xenithpulse.com)
+[Message us on WhatsApp](https://wa.me/97455911793?text=Thermal%20Bridge%20integration) · [xenithpulse.com](https://xenithpulse.com)
 
 ## Contributing
 

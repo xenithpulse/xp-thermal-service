@@ -202,7 +202,6 @@ export class InstanceLock {
       // a silent process wondering whether it has hung.
       if (!announced) {
         announced = true;
-        // eslint-disable-next-line no-console
         console.warn(
           `[LOCK] Process ${holder.pid} still holds the instance lock; ` +
             `waiting up to ${Math.round(waitForHandoverMs / 1000)}s for it to exit...`

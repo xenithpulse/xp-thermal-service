@@ -1,95 +1,76 @@
 #!/usr/bin/env node
 /**
- * XP Thermal Service CLI
- * Command-line interface for service management
+ * Thermal Bridge developer CLI
+ *
+ * Talks to a running service over its local API. Installing and running the
+ * app is ThermalBridge.exe's job; see docs/BUILD.md and docs/SERVICE-MODE.md.
  */
 
 import { Command } from 'commander';
-import * as readline from 'readline';
-import * as path from 'path';
-import * as fs from 'fs';
-import { WindowsServiceManager } from './service/installer';
 import { ThermalPrintService } from './index';
+import { findRunningServices } from './app/discover';
+import { PRODUCT_NAME, VERSION } from './app/identity';
 
-/**
- * Read the active port from active_port.txt, falling back to default 9100.
- * Scans known locations: CWD, CWD/data, common install paths.
- */
-function getActivePort(): number {
-  const candidates = [
-    path.join(process.cwd(), 'active_port.txt'),
-    path.join(process.cwd(), 'data', 'active_port.txt'),
-    path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'XPThermalService', 'active_port.txt'),
-    path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'XPThermalService', 'data', 'active_port.txt'),
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        const port = parseInt(fs.readFileSync(candidate, 'utf8').trim(), 10);
-        if (port >= 1 && port <= 65535) {
-          return port;
-        }
-      }
-    } catch {
-      // Ignore read errors, try next
-    }
-  }
-
-  return 9100; // Default fallback
-}
-
-// API Response types
 interface HealthResponse {
+  status: string;
+  name?: string;
+  mode?: string;
+  version: string;
   uptime: number;
   printers: { online: number; total: number };
   queue: { pending: number; processing: number };
-}
-
-interface PrintResultResponse {
-  data: { jobId: string };
 }
 
 interface PrinterInfo {
   id: string;
   name: string;
   type: string;
-  status: string;
-  isOnline: boolean;
-  totalJobsPrinted: number;
+  state: { status: string; isConnected: boolean; totalJobsPrinted: number };
 }
 
-interface PrintersResponse {
-  printers: PrinterInfo[];
+/** The first service answering in the discovery range, or exit with a hint. */
+async function activePort(): Promise<number> {
+  const [first] = await findRunningServices();
+  if (!first) {
+    console.error(`Error: no ${PRODUCT_NAME} is answering on 127.0.0.1:9100-9110. Is it running?`);
+    process.exit(1);
+  }
+  return first.port;
+}
+
+/** The API key, which the service hands to callers on this machine. */
+async function apiHeaders(port: number): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/local-token`, { signal: AbortSignal.timeout(2000) });
+    const body = (await res.json()) as { apiKey?: string };
+    if (body.apiKey) headers['X-API-Key'] = body.apiKey;
+  } catch {
+    // Auth may be disabled; let the real request report the problem.
+  }
+  return headers;
 }
 
 const program = new Command();
 
 program
-  .name('xp-thermal')
-  .description('XP Thermal Print Service CLI')
-  .version('1.0.0');
+  .name('thermal-bridge')
+  .description(`${PRODUCT_NAME} CLI`)
+  .version(VERSION);
 
-// Run command - starts the service in foreground
 program
   .command('run')
-  .description('Run the service in foreground (development mode)')
+  .description('Run the print server in the foreground (development mode)')
   .option('-c, --config <path>', 'Path to configuration file')
   .action(async (options) => {
-    console.log('Starting XP Thermal Service in foreground mode...');
-    console.log('Press Ctrl+C to stop.\n');
-
+    console.log(`Starting ${PRODUCT_NAME} in foreground mode... Press Ctrl+C to stop.\n`);
     const service = new ThermalPrintService(options.config);
-
     const shutdown = async () => {
-      console.log('\nShutting down...');
       await service.stop();
       process.exit(0);
     };
-
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-
     try {
       await service.start();
     } catch (error) {
@@ -98,243 +79,73 @@ program
     }
   });
 
-// Install command
-program
-  .command('install')
-  .description('Install as Windows service')
-  .option('-c, --config <path>', 'Path to configuration file')
-  .action(async (options) => {
-    console.log('Installing XP Thermal Service...');
-
-    const manager = new WindowsServiceManager({
-      name: 'XPThermalService',
-      description: 'XP Thermal Print Service',
-      script: __filename,
-      env: options.config ? [{ name: 'XP_CONFIG_PATH', value: options.config }] : []
-    });
-
-    try {
-      await manager.install();
-      console.log('Service installed successfully!');
-      console.log('The service will start automatically on system boot.');
-    } catch (error) {
-      console.error('Installation failed:', error);
-      process.exit(1);
-    }
-  });
-
-// Uninstall command
-program
-  .command('uninstall')
-  .description('Uninstall Windows service')
-  .action(async () => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
-
-    const confirm = await new Promise<string>((resolve) => {
-      rl.question('Are you sure you want to uninstall? (y/N): ', resolve);
-    });
-    rl.close();
-
-    if (confirm.toLowerCase() !== 'y') {
-      console.log('Cancelled.');
-      return;
-    }
-
-    console.log('Uninstalling XP Thermal Service...');
-
-    const manager = new WindowsServiceManager({
-      name: 'XPThermalService',
-      description: 'XP Thermal Print Service',
-      script: __filename
-    });
-
-    try {
-      await manager.uninstall();
-      console.log('Service uninstalled successfully!');
-    } catch (error) {
-      console.error('Uninstallation failed:', error);
-      process.exit(1);
-    }
-  });
-
-// Start command
-program
-  .command('start')
-  .description('Start the Windows service')
-  .action(async () => {
-    console.log('Starting XP Thermal Service...');
-
-    const manager = new WindowsServiceManager({
-      name: 'XPThermalService',
-      description: 'XP Thermal Print Service',
-      script: __filename
-    });
-
-    try {
-      await manager.start();
-      console.log('Service started.');
-    } catch (error) {
-      console.error('Failed to start:', error);
-      process.exit(1);
-    }
-  });
-
-// Stop command
-program
-  .command('stop')
-  .description('Stop the Windows service')
-  .action(async () => {
-    console.log('Stopping XP Thermal Service...');
-
-    const manager = new WindowsServiceManager({
-      name: 'XPThermalService',
-      description: 'XP Thermal Print Service',
-      script: __filename
-    });
-
-    try {
-      await manager.stop();
-      console.log('Service stopped.');
-    } catch (error) {
-      console.error('Failed to stop:', error);
-      process.exit(1);
-    }
-  });
-
-// Status command
 program
   .command('status')
-  .description('Check service status')
+  .description('Show what is answering on the print port range')
   .action(async () => {
-    const manager = new WindowsServiceManager({
-      name: 'XPThermalService',
-      description: 'XP Thermal Print Service',
-      script: __filename
-    });
-
-    const exists = await manager.isInstalled();
-    
-    if (!exists) {
-      console.log('Status: NOT INSTALLED');
+    const services = await findRunningServices();
+    if (services.length === 0) {
+      console.log('Status: NOT RUNNING (nothing answers on 127.0.0.1:9100-9110)');
       return;
     }
-
-    // Check if running by trying to connect to the API
-    const activePort = getActivePort();
-    try {
-      const response = await fetch(`http://127.0.0.1:${activePort}/api/health`, {
-        signal: AbortSignal.timeout(2000)
-      });
-      
-      if (response.ok) {
-        const data = await response.json() as HealthResponse;
-        console.log('Status: RUNNING');
-        console.log(`Port: ${activePort}`);
-        console.log(`URL: http://127.0.0.1:${activePort}`);
-        console.log(`Dashboard: http://127.0.0.1:${activePort}/dashboard`);
-        console.log(`Uptime: ${formatUptime(data.uptime)}`);
-        console.log(`Printers: ${data.printers.online}/${data.printers.total} online`);
-        console.log(`Queue: ${data.queue.pending} pending, ${data.queue.processing} processing`);
-      } else {
-        console.log(`Status: INSTALLED (not responding on port ${activePort})`);
-      }
-    } catch {
-      console.log(`Status: INSTALLED (not running or not responding on port ${activePort})`);
+    for (const s of services) {
+      const res = await fetch(`http://127.0.0.1:${s.port}/health`, { signal: AbortSignal.timeout(2000) });
+      const h = (await res.json()) as HealthResponse;
+      console.log(`${h.name ?? 'XP Thermal Print Service (legacy)'} ${h.version} on port ${s.port}`);
+      console.log(`  Status:    ${h.status}${h.mode ? ` (${h.mode} mode)` : ''}`);
+      console.log(`  Dashboard: http://127.0.0.1:${s.port}/dashboard`);
+      console.log(`  Uptime:    ${formatUptime(h.uptime)}`);
+      console.log(`  Printers:  ${h.printers.online}/${h.printers.total} online`);
+      console.log(`  Queue:     ${h.queue.pending} pending, ${h.queue.processing} processing`);
     }
   });
 
-// Test print command
 program
   .command('test-print')
   .description('Send a test print job')
-  .option('-p, --printer <id>', 'Printer ID (defaults to first available)')
+  .option('-p, --printer <id>', 'Printer ID (defaults to the default printer)')
   .action(async (options) => {
-    console.log('Sending test print...');
-
-    try {
-      const activePort = getActivePort();
-      const response = await fetch(`http://127.0.0.1:${activePort}/api/print`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          idempotencyKey: `cli_test_${Date.now()}`,
-          templateType: 'test',
-          printerId: options.printer,
-          priority: 2,
-          payload: {
-            message: 'Manual test print from CLI',
-            timestamp: new Date().toISOString()
-          }
-        }),
-        signal: AbortSignal.timeout(5000)
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json() as { message?: string };
-        throw new Error(errorData.message || 'Request failed');
-      }
-
-      const result = await response.json() as PrintResultResponse;
-      console.log(`Test print queued. Job ID: ${result.data.jobId}`);
-      console.log('Check printer for output.');
-    } catch (error) {
-      const err = error as Error & { code?: string };
-      if (err.name === 'AbortError' || err.code === 'ECONNREFUSED') {
-        console.error('Error: Cannot connect to service. Is it running?');
-      } else {
-        console.error('Error:', err.message);
-      }
+    const port = await activePort();
+    const res = await fetch(`http://127.0.0.1:${port}/api/print`, {
+      method: 'POST',
+      headers: await apiHeaders(port),
+      body: JSON.stringify({
+        idempotencyKey: `cli_test_${Date.now()}`,
+        templateType: 'test',
+        printerId: options.printer,
+        priority: 2,
+        payload: { message: 'Manual test print from CLI' }
+      }),
+      signal: AbortSignal.timeout(5000)
+    });
+    const body = (await res.json()) as { id?: string; jobs?: Array<{ id: string }>; message?: string };
+    if (!res.ok) {
+      console.error('Error:', body.message || `HTTP ${res.status}`);
       process.exit(1);
     }
+    console.log(`Test print queued. Job ID: ${body.id ?? body.jobs?.[0]?.id ?? 'unknown'}`);
   });
 
-// List printers command
 program
   .command('printers')
   .description('List configured printers')
   .action(async () => {
-    try {
-      const activePort = getActivePort();
-      const response = await fetch(`http://127.0.0.1:${activePort}/api/printers`, {
-        signal: AbortSignal.timeout(2000)
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to get printers');
-      }
-
-      const result = await response.json() as PrintersResponse;
-      const printers = result.printers;
-
-      if (printers.length === 0) {
-        console.log('No printers configured.');
-        return;
-      }
-
-      console.log('\nConfigured Printers:');
-      console.log('-------------------');
-      
-      for (const printer of printers) {
-        const statusIcon = printer.isOnline ? '✓' : '✗';
-        const statusColor = printer.isOnline ? '\x1b[32m' : '\x1b[31m';
-        console.log(`${statusColor}${statusIcon}\x1b[0m ${printer.id}`);
-        console.log(`   Name: ${printer.name}`);
-        console.log(`   Type: ${printer.type}`);
-        console.log(`   Status: ${printer.status}`);
-        console.log(`   Jobs Printed: ${printer.totalJobsPrinted}`);
-        console.log('');
-      }
-    } catch (error) {
-      const err = error as Error & { code?: string };
-      if (err.code === 'ECONNREFUSED') {
-        console.error('Error: Cannot connect to service. Is it running?');
-      } else {
-        console.error('Error:', err.message);
-      }
+    const port = await activePort();
+    const res = await fetch(`http://127.0.0.1:${port}/api/printers`, {
+      headers: await apiHeaders(port),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!res.ok) {
+      console.error(`Error: HTTP ${res.status}`);
       process.exit(1);
+    }
+    const { printers } = (await res.json()) as { printers: PrinterInfo[] };
+    if (printers.length === 0) {
+      console.log('No printers configured. Open the dashboard and click "Detect printers".');
+      return;
+    }
+    for (const p of printers) {
+      console.log(`${p.state.isConnected ? 'online ' : 'offline'}  ${p.id}  ${p.name} (${p.type}, ${p.state.status}, ${p.state.totalJobsPrinted} printed)`);
     }
   });
 
@@ -343,14 +154,11 @@ function formatUptime(ms: number): string {
   const days = Math.floor(totalSeconds / 86400);
   const hours = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const secs = Math.floor(totalSeconds % 60);
-
   const parts: string[] = [];
   if (days > 0) parts.push(`${days}d`);
   if (hours > 0) parts.push(`${hours}h`);
   if (minutes > 0) parts.push(`${minutes}m`);
-  parts.push(`${secs}s`);
-
+  parts.push(`${totalSeconds % 60}s`);
   return parts.join(' ');
 }
 

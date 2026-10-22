@@ -1,0 +1,2742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<title>Thermal Bridge</title>
+<link rel="icon" href="/favicon.ico">
+<script>
+  // Apply the theme before first paint, so a dark-mode till never flashes white.
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem('tb-theme'); } catch (e) { /* storage blocked: follow the system */ }
+    var dark = saved === 'dark' || (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.classList.toggle('dark', dark);
+  })();
+</script>
+<style>/* tailwind */</style>
+</head>
+<body class="bg-canvas font-sans text-sm text-fg antialiased">
+
+<div class="flex h-screen overflow-hidden">
+
+  <!-- ═══ Sidebar ═══ -->
+  <aside class="hidden w-64 shrink-0 flex-col border-r border-line bg-panel md:flex">
+    <div class="flex h-16 items-center gap-3 px-5">
+      <svg class="size-9 shrink-0" viewBox="0 0 256 256" aria-hidden="true" data-logo></svg>
+      <div class="min-w-0 leading-tight">
+        <div class="font-display text-[15px] font-semibold tracking-tight">Thermal Bridge</div>
+        <div class="text-[11px] text-fg-3">by XenithPulse</div>
+      </div>
+    </div>
+    <nav class="flex-1 space-y-0.5 overflow-y-auto px-3 py-3" id="sideNav" aria-label="Main"></nav>
+    <div class="space-y-3 border-t border-line px-5 py-4">
+      <div class="flex items-center justify-between text-xs">
+        <span class="flex items-center gap-2 text-fg-2" id="liveLabel" title="Connecting…">
+          <span class="relative flex size-2">
+            <span class="absolute inline-flex size-full rounded-full bg-fg-3" id="livePing"></span>
+            <span class="relative inline-flex size-2 rounded-full bg-fg-3" id="liveDot"></span>
+          </span>
+          <span id="liveText">Connecting…</span>
+        </span>
+        <button class="btn btn-ghost btn-sm btn-icon" data-action="cycleTheme" id="themeButton" title="Theme" aria-label="Change theme"></button>
+      </div>
+      <div class="flex items-center gap-2 text-[11px] text-fg-3">
+        <svg class="h-3 w-5 shrink-0" viewBox="120 250 784 520" aria-hidden="true"><polyline points="163.84,521.01 344.88,521.01 449.33,286.72 588.6,737.28 686.08,521.01 860.16,521.01" fill="none" stroke="#34d399" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>XenithPulse · v<span id="footerVersion">…</span></span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="flex min-w-0 flex-1 flex-col">
+
+    <!-- ═══ Top bar (narrow windows) ═══ -->
+    <header class="border-b border-line bg-panel md:hidden">
+      <div class="flex h-14 items-center gap-3 px-4">
+        <svg class="size-8 shrink-0" viewBox="0 0 256 256" aria-hidden="true" data-logo></svg>
+        <div class="font-display text-[15px] font-semibold tracking-tight">Thermal Bridge</div>
+        <button class="btn btn-ghost btn-sm btn-icon ml-auto" data-action="cycleTheme" aria-label="Change theme" data-theme-icon></button>
+      </div>
+      <nav class="flex gap-1 overflow-x-auto px-3 pb-2" id="topNav" aria-label="Main"></nav>
+    </header>
+
+    <main class="flex-1 overflow-y-auto" id="main">
+      <div class="mx-auto w-full max-w-6xl space-y-5 px-4 py-6 sm:px-8 sm:py-8">
+
+        <!-- Page heading -->
+        <div>
+          <h1 class="font-display text-2xl font-semibold tracking-tight" id="pageTitle">Overview</h1>
+          <p class="mt-1 text-fg-2" id="pageSubtitle"></p>
+        </div>
+
+        <!-- Always visible: is printing working, and the two things people come here to do. -->
+        <section class="card relative overflow-hidden" id="statusBanner">
+          <div class="pointer-events-none absolute inset-0 bg-linear-to-r from-fg-3/10 via-transparent to-transparent" id="sbWash"></div>
+          <div class="relative flex flex-wrap items-center justify-between gap-5 p-5">
+            <div class="flex min-w-0 items-center gap-4">
+              <div class="relative grid size-12 shrink-0 place-items-center rounded-full bg-fg-3/15 text-fg-3" id="sbOrb">
+                <span class="absolute inset-0 rounded-full" id="sbPing"></span>
+                <svg class="relative size-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </div>
+              <div class="min-w-0">
+                <div class="font-display text-lg font-semibold tracking-tight" id="sbTitle">Checking…</div>
+                <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-fg-2" id="sbSub"></div>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button class="btn btn-secondary" data-action="openDiscover"><span data-icon="search"></span>Detect printers</button>
+              <button class="btn btn-primary" data-action="printTestPage"><span data-icon="printer"></span>Print test page</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Website pairing requests, migration offers and updates. -->
+        <div class="space-y-3 empty:hidden" id="notices"></div>
+
+        <!-- ═══ OVERVIEW ═══ -->
+        <div class="page space-y-5" id="page-overview">
+          <div id="healthReasons" hidden></div>
+          <div class="grid grid-cols-2 gap-3 lg:grid-cols-4" id="overviewStats"></div>
+
+          <div class="grid gap-5 lg:grid-cols-5">
+            <section class="card lg:col-span-3">
+              <div class="card-head">
+                <div>
+                  <h2 class="card-title">Printers</h2>
+                  <p class="card-sub">What each printer is for, and whether it can print now</p>
+                </div>
+                <button class="btn btn-ghost btn-sm" data-nav="printers">Manage<span data-icon="chevron"></span></button>
+              </div>
+              <ul class="divide-y divide-line" id="overviewPrinters"></ul>
+            </section>
+
+            <section class="card lg:col-span-2">
+              <div class="card-head">
+                <div>
+                  <h2 class="card-title">Queue</h2>
+                  <p class="card-sub" id="overviewQueueState">Jobs waiting, printing and done</p>
+                </div>
+                <button class="btn btn-ghost btn-sm" data-nav="jobs">Jobs<span data-icon="chevron"></span></button>
+              </div>
+              <div class="p-5" id="overviewQueue"></div>
+            </section>
+          </div>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Recent jobs</h2>
+                <p class="card-sub">The last five things sent to print</p>
+              </div>
+              <button class="btn btn-ghost btn-sm" data-nav="jobs">All jobs<span data-icon="chevron"></span></button>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="tbl">
+                <thead><tr><th>Job</th><th>Printer</th><th>Type</th><th>Status</th><th class="text-right">Sent</th></tr></thead>
+                <tbody id="overviewJobs"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ═══ PRINTERS ═══ -->
+        <div class="page space-y-5" id="page-printers" hidden>
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap gap-2" id="printerSummary"></div>
+            <div class="flex flex-wrap gap-2">
+              <button class="btn btn-ghost" data-action="refreshPrinters"><span data-icon="refresh"></span>Refresh</button>
+              <button class="btn btn-secondary" data-action="openAddPrinter"><span data-icon="plus"></span>Add manually</button>
+              <button class="btn btn-primary" data-action="openDiscover"><span data-icon="search"></span>Detect printers</button>
+            </div>
+          </div>
+          <div class="grid gap-4" id="printerCards"></div>
+        </div>
+
+        <!-- ═══ JOBS ═══ -->
+        <div class="page space-y-5" id="page-jobs" hidden>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Queue</h2>
+                <p class="card-sub" id="queueState">Jobs are printed in the order they arrive</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button class="btn btn-secondary btn-sm" data-action="toggleQueue" id="btnQueueToggle"><span data-icon="pause"></span>Pause printing</button>
+                <button class="btn btn-danger btn-sm" data-action="clearFailedJobs"><span data-icon="trash"></span>Clear failed</button>
+              </div>
+            </div>
+            <div class="p-5" id="queueStats"></div>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div class="seg" role="tablist" id="jobFilters">
+                <button class="seg-item" role="tab" aria-selected="true" data-filter="">All</button>
+                <button class="seg-item" role="tab" aria-selected="false" data-filter="failed,dead_letter" id="jobFilterProblem">Needs attention</button>
+                <button class="seg-item" role="tab" aria-selected="false" data-filter="pending,queued,retry_scheduled">Waiting</button>
+                <button class="seg-item" role="tab" aria-selected="false" data-filter="completed">Printed</button>
+              </div>
+              <button class="btn btn-ghost btn-sm" data-action="loadJobs"><span data-icon="refresh"></span>Refresh</button>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="tbl">
+                <thead><tr><th>Job</th><th>Printer</th><th>Type</th><th>Status</th><th>Sent</th><th></th></tr></thead>
+                <tbody id="jobsTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ═══ WEBSITES ═══ -->
+        <div class="page space-y-5" id="page-websites" hidden>
+          <div class="callout callout-info">
+            <span data-icon="shield" class="text-fg-3"></span>
+            <div class="text-fg-2">
+              When a website tries to print, it appears here and at the top of every page with <strong class="text-fg">Allow</strong> and <strong class="text-fg">Block</strong>.
+              Pages on this computer (localhost) and on your local network can always print.
+            </div>
+          </div>
+
+          <section class="card" id="pendingCard" hidden>
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Asking to print</h2>
+                <p class="card-sub">Allow a site only if it is your POS or ordering website</p>
+              </div>
+            </div>
+            <ul class="divide-y divide-line" id="pendingList"></ul>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Add a website</h2>
+                <p class="card-sub">For a site that has not tried to print yet</p>
+              </div>
+            </div>
+            <form class="flex flex-wrap gap-2 p-5" id="addOriginForm">
+              <input class="input max-w-md flex-1 font-mono" id="newOrigin" placeholder="https://pos.example.com" autocomplete="off" spellcheck="false" aria-label="Website address">
+              <button class="btn btn-primary" type="submit"><span data-icon="plus"></span>Allow website</button>
+            </form>
+          </section>
+
+          <div class="grid gap-5 lg:grid-cols-2">
+            <section class="card">
+              <div class="card-head"><h2 class="card-title">Allowed</h2><span class="chip" id="allowedCount">0</span></div>
+              <ul class="divide-y divide-line" id="allowedList"></ul>
+            </section>
+            <section class="card">
+              <div class="card-head"><h2 class="card-title">Blocked</h2><span class="chip" id="blockedCount">0</span></div>
+              <ul class="divide-y divide-line" id="blockedList"></ul>
+            </section>
+          </div>
+        </div>
+
+        <!-- ═══ BACKUP (Pulsar POS installs only) ═══ -->
+        <div class="page space-y-5" id="page-backup" hidden>
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Database backup</h2>
+                <p class="card-sub" id="backupHint">Paths, retention and the daily schedule are set in the POS under Server Management → Backups. This page runs and restores them on this computer.</p>
+              </div>
+              <button class="btn btn-primary btn-sm" data-action="runBackupNow"><span data-icon="play"></span>Run backup now</button>
+            </div>
+            <div class="grid grid-cols-2 gap-3 p-5 lg:grid-cols-4" id="backupStats"></div>
+          </section>
+          <section class="card">
+            <div class="card-head"><h2 class="card-title">Available backups</h2></div>
+            <div class="p-5" id="backupList"><p class="text-fg-3">Loading…</p></div>
+          </section>
+        </div>
+
+        <!-- ═══ SETTINGS ═══ -->
+        <div class="page space-y-5" id="page-settings" hidden>
+          <div class="seg" role="tablist" id="settingsTabs">
+            <button class="seg-item" role="tab" aria-selected="true" data-tab="general">General</button>
+            <button class="seg-item" role="tab" aria-selected="false" data-tab="connection">Connection</button>
+            <button class="seg-item" role="tab" aria-selected="false" data-tab="security">Security</button>
+            <button class="seg-item" role="tab" aria-selected="false" data-tab="about">About</button>
+          </div>
+
+          <!-- General -->
+          <div class="space-y-5" data-panel="general">
+            <section class="card divide-y divide-line">
+              <div class="flex items-center justify-between gap-6 px-5 py-4" id="startupRow" hidden>
+                <div>
+                  <div class="font-medium">Start with Windows</div>
+                  <div class="mt-0.5 text-[13px] text-fg-3">Keep this on so printing works after a restart without anyone opening the app.</div>
+                </div>
+                <label class="switch"><input type="checkbox" id="startupToggle" aria-label="Start with Windows"><span></span></label>
+              </div>
+              <div class="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+                <div>
+                  <div class="font-medium">Appearance</div>
+                  <div class="mt-0.5 text-[13px] text-fg-3">System follows your Windows light or dark setting.</div>
+                </div>
+                <div class="seg" role="radiogroup" id="themeChoice">
+                  <button class="seg-item" role="radio" data-theme-choice="system" aria-selected="false"><span data-icon="monitor"></span>System</button>
+                  <button class="seg-item" role="radio" data-theme-choice="light" aria-selected="false"><span data-icon="sun"></span>Light</button>
+                  <button class="seg-item" role="radio" data-theme-choice="dark" aria-selected="false"><span data-icon="moon"></span>Dark</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="card" id="updatesCard">
+              <div class="card-head">
+                <div>
+                  <h2 class="card-title">Updates</h2>
+                  <p class="card-sub">Checked only when you click. Nothing is sent about you or your printers.</p>
+                </div>
+                <button class="btn btn-secondary btn-sm" data-action="checkForUpdates" id="btnCheckUpdates"><span data-icon="refresh"></span>Check for updates</button>
+              </div>
+              <div class="p-5" id="updateStatus">
+                <p class="text-fg-2">You are on version <span class="font-medium text-fg" data-version>…</span>.</p>
+              </div>
+            </section>
+          </div>
+
+          <!-- Connection -->
+          <div class="space-y-5" data-panel="connection" hidden>
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2 class="card-title">Server</h2>
+                  <p class="card-sub">Where web apps reach Thermal Bridge on this computer</p>
+                </div>
+                <button class="btn btn-primary btn-sm" data-action="saveServerConfig">Save changes</button>
+              </div>
+              <div class="grid gap-5 p-5 sm:grid-cols-2">
+                <div>
+                  <label class="label" for="cfgHost">Listen address</label>
+                  <input class="input font-mono" type="text" id="cfgHost" placeholder="127.0.0.1">
+                  <p class="hint">127.0.0.1 keeps it on this computer only.</p>
+                </div>
+                <div>
+                  <label class="label" for="cfgPort">Port</label>
+                  <input class="input font-mono" type="number" id="cfgPort" placeholder="9100">
+                  <p class="hint" id="activePortNote">Takes effect after a restart.</p>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- Security -->
+          <div class="space-y-5" data-panel="security" hidden>
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2 class="card-title">Access</h2>
+                  <p class="card-sub">Applied immediately, no restart needed</p>
+                </div>
+                <button class="btn btn-primary btn-sm" data-action="saveSecurityConfig">Save changes</button>
+              </div>
+              <div class="grid gap-5 p-5 sm:grid-cols-2">
+                <div>
+                  <label class="label" for="cfgApiKey">API key</label>
+                  <input class="input font-mono" type="text" id="cfgApiKey" placeholder="Leave blank to turn off" autocomplete="off" spellcheck="false">
+                  <p class="hint">Web apps send it in the X-API-Key header. The dashboard picks it up by itself.</p>
+                </div>
+                <div>
+                  <label class="label" for="cfgRateLimit">Requests per minute</label>
+                  <input class="input font-mono" type="number" id="cfgRateLimit" placeholder="120">
+                  <p class="hint">Per website. Raise it only for very busy sites.</p>
+                </div>
+                <div class="sm:col-span-2">
+                  <label class="label" for="cfgOrigins">Allowed websites (advanced)</label>
+                  <input class="input font-mono" type="text" id="cfgOrigins" placeholder="https://pos.example.com, https://*.example.com" spellcheck="false">
+                  <p class="hint">Comma-separated. Wildcards such as https://*.example.com work here. Avoid “*” on its own: it lets any website you visit print. The Websites page manages the same list one site at a time.</p>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- About -->
+          <div class="space-y-5" data-panel="about" hidden>
+            <section class="card">
+              <div class="flex flex-wrap items-center gap-5 p-6">
+                <svg class="size-16 shrink-0" viewBox="0 0 256 256" aria-hidden="true" data-logo></svg>
+                <div class="min-w-0 flex-1">
+                  <div class="font-display text-xl font-semibold tracking-tight">Thermal Bridge</div>
+                  <div class="text-fg-2">Silent receipt printing for web apps · by XenithPulse</div>
+                  <div class="mt-2 flex flex-wrap gap-2" id="aboutChips"></div>
+                </div>
+                <div class="flex flex-wrap gap-2" id="aboutLinks"></div>
+              </div>
+              <dl class="grid border-t border-line text-[13px] sm:grid-cols-[180px_1fr]" id="appAbout"></dl>
+            </section>
+            <section class="card">
+              <div class="card-head"><h2 class="card-title">System</h2></div>
+              <div class="grid grid-cols-2 gap-3 p-5 lg:grid-cols-5" id="systemStats"></div>
+            </section>
+          </div>
+        </div>
+
+        <footer class="pt-4 pb-2 text-center text-xs text-fg-3">
+          Thermal Bridge by XenithPulse · Web apps print to <span class="font-mono" id="footerUrl">http://127.0.0.1:9100</span>
+        </footer>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ═══ Detect printers ═══ -->
+<dialog class="dlg max-w-4xl" id="discoverDialog" aria-labelledby="discoverTitle">
+  <div class="dlg-head">
+    <div>
+      <h2 class="font-display text-lg font-semibold" id="discoverTitle">Detect printers</h2>
+      <p class="mt-0.5 text-[13px] text-fg-3">Pick a printer, give it a name, and choose what it is for.</p>
+    </div>
+    <button class="btn btn-ghost btn-sm btn-icon" data-close aria-label="Close"><span data-icon="x"></span></button>
+  </div>
+  <div class="dlg-body space-y-6">
+    <div class="space-y-3" id="discoverSystem"></div>
+    <div>
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <div class="section-label">Printers in Windows</div>
+        <button class="btn btn-ghost btn-sm" data-action="rescanDiscover"><span data-icon="refresh"></span>Rescan</button>
+      </div>
+      <div class="space-y-3" id="discoverList"></div>
+    </div>
+    <div>
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="section-label">Printers on the network</div>
+          <p class="mt-1 text-xs text-fg-3">Sweeps this PC's local network for printers listening on port 9100.</p>
+        </div>
+        <button class="btn btn-ghost btn-sm" data-action="scanNetwork" id="btnScanNetwork"><span data-icon="wifi"></span>Scan network</button>
+      </div>
+      <div class="space-y-3" id="networkScanResult"></div>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <span class="mr-auto text-xs text-fg-3">Not sure? Set up automatically picks the best receipt printer.</span>
+    <button class="btn btn-secondary" data-close>Close</button>
+    <button class="btn btn-primary" data-action="autoSetup"><span data-icon="sparkles"></span>Set up automatically</button>
+  </div>
+</dialog>
+
+<!-- ═══ Printer diagnostics ═══ -->
+<dialog class="dlg max-w-2xl" id="diagnoseDialog" aria-labelledby="diagnoseTitle">
+  <div class="dlg-head">
+    <div>
+      <h2 class="font-display text-lg font-semibold" id="diagnoseTitle">Printer details</h2>
+      <p class="mt-0.5 text-[13px] text-fg-3">What Windows reports about this printer, and what can be repaired.</p>
+    </div>
+    <button class="btn btn-ghost btn-sm btn-icon" data-close aria-label="Close"><span data-icon="x"></span></button>
+  </div>
+  <div class="dlg-body" id="diagnoseBody"></div>
+  <div class="dlg-foot">
+    <button class="btn btn-secondary" data-close>Close</button>
+    <button class="btn btn-primary" id="diagnoseRepairBtn"><span data-icon="wrench"></span>Repair now</button>
+  </div>
+</dialog>
+
+<!-- ═══ Add / edit printer ═══ -->
+<dialog class="dlg max-w-2xl" id="printerDialog" aria-labelledby="modalTitle">
+  <div class="dlg-head">
+    <div>
+      <h2 class="font-display text-lg font-semibold" id="modalTitle">Add printer</h2>
+      <p class="mt-0.5 text-[13px] text-fg-3" id="modalSubtitle">Detect printers is quicker for most setups.</p>
+    </div>
+    <button class="btn btn-ghost btn-sm btn-icon" data-close aria-label="Close"><span data-icon="x"></span></button>
+  </div>
+  <form class="dlg-body space-y-6" id="printerForm" novalidate>
+    <input type="hidden" id="editPrinterId">
+
+    <div class="grid gap-5 sm:grid-cols-[3fr_2fr]">
+      <div>
+        <label class="label" for="pRole">What is this printer for?</label>
+        <select class="input" id="pRole">
+          <option value="receipt">Receipt: bills and the cash drawer</option>
+          <option value="kitchen">Kitchen (KOT): order tickets</option>
+          <option value="bar">Bar: drink orders</option>
+          <option value="label">Labels: items and packaging</option>
+          <option value="__custom">Something else (enter an ID)…</option>
+        </select>
+        <input class="input mt-2 font-mono" type="text" id="pId" placeholder="e.g. counter2" hidden>
+        <p class="hint" id="pIdHint">This is the ID the POS sends jobs to. Picking a role sets it for you.</p>
+      </div>
+      <div>
+        <label class="label" for="pName">Display name</label>
+        <input class="input" type="text" id="pName" placeholder="e.g. Front counter">
+      </div>
+    </div>
+
+    <div>
+      <span class="label">Connection</span>
+      <div class="seg" role="radiogroup" id="pTypeSeg">
+        <button type="button" class="seg-item" role="radio" data-type="usb" aria-selected="true"><span data-icon="usb"></span>USB / Windows printer</button>
+        <button type="button" class="seg-item" role="radio" data-type="network" aria-selected="false"><span data-icon="wifi"></span>Network (IP)</button>
+      </div>
+      <input type="hidden" id="pType" value="usb">
+    </div>
+
+    <div id="usbFields">
+      <label class="label" for="pPrinterName">Which printer?</label>
+      <select class="input" id="pPrinterName"><option value="">Looking for printers…</option></select>
+      <p class="hint">Pick a different printer here to swap the hardware without losing these settings. If the printer moves to another USB port, Thermal Bridge follows it.</p>
+    </div>
+
+    <div class="space-y-3" id="networkFields" hidden>
+      <div class="grid gap-5 sm:grid-cols-[1fr_140px]">
+        <div>
+          <label class="label" for="pHost">IP address</label>
+          <input class="input font-mono" type="text" id="pHost" placeholder="192.168.1.100" spellcheck="false">
+        </div>
+        <div>
+          <label class="label" for="pPort">Port</label>
+          <input class="input font-mono" type="number" id="pPort" value="9100">
+        </div>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <button type="button" class="btn btn-secondary btn-sm" data-action="testConnection" id="btnTestConn"><span data-icon="plug"></span>Test connection</button>
+        <span class="text-xs text-fg-3">The IP is on the printer's self-test page. Give it a static address or a DHCP reservation so it does not move.</span>
+      </div>
+      <div id="testConnResult" hidden></div>
+    </div>
+
+    <div class="grid gap-5 sm:grid-cols-2">
+      <div>
+        <label class="label" for="pWidthPreset">Paper size</label>
+        <select class="input" id="pWidthPreset">
+          <option value="48">80 mm (standard receipt)</option>
+          <option value="32">58 mm (narrow)</option>
+          <option value="42">76 mm</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <div class="mt-2" id="widthCustomRow" hidden>
+          <label class="label" for="pWidth">Characters per line</label>
+          <input class="input font-mono" type="number" id="pWidth" value="48" min="20" max="80">
+        </div>
+      </div>
+      <label class="flex cursor-pointer items-start gap-3 self-end rounded-lg border border-line px-4 py-3 hover:bg-hover/60">
+        <input type="checkbox" class="check mt-0.5" id="pDefault">
+        <span><span class="block font-medium">Default printer</span><span class="block text-xs text-fg-3">Used when a job does not name a printer</span></span>
+      </label>
+    </div>
+
+    <div class="rounded-xl border border-line">
+      <div class="flex items-center gap-3 border-b border-line px-4 py-3">
+        <span data-icon="drawer" class="text-fg-3"></span>
+        <div class="font-medium">Cash drawer</div>
+      </div>
+      <div class="space-y-4 p-4">
+        <div class="flex flex-wrap gap-x-6 gap-y-2">
+          <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="cdEnabled">Drawer is connected to this printer</label>
+          <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="cdOpenOnPrint">Open when a receipt prints</label>
+        </div>
+        <div class="grid gap-5 sm:grid-cols-2">
+          <div>
+            <label class="label" for="cdPin">Connector</label>
+            <select class="input" id="cdPin">
+              <option value="2">Pin 2 (standard)</option>
+              <option value="5">Pin 5 (alternate / second drawer)</option>
+            </select>
+          </div>
+          <div>
+            <label class="label" for="cdOnTime">Pulse length (ms)</label>
+            <input class="input font-mono" type="number" id="cdOnTime" value="50" min="10" max="510" step="10">
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button type="button" class="btn btn-secondary btn-sm" data-action="testDrawerPulse"><span data-icon="drawer"></span>Test drawer now</button>
+          <span class="text-xs text-fg-3">If it does not open, try the other connector or a longer pulse. Some drawers need 100 ms or more.</span>
+        </div>
+      </div>
+    </div>
+
+    <details class="group rounded-xl border border-line" id="advancedFields">
+      <summary class="flex cursor-pointer list-none items-center gap-3 px-4 py-3 select-none">
+        <span data-icon="sliders" class="text-fg-3"></span>
+        <span class="font-medium">Printer features</span>
+        <span class="text-xs text-fg-3">Rarely needed</span>
+        <span data-icon="chevronDown" class="ml-auto text-fg-3 transition-transform group-open:rotate-180"></span>
+      </summary>
+      <div class="grid grid-cols-2 gap-x-6 gap-y-2.5 border-t border-line p-4 sm:grid-cols-3">
+        <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="capBarcode" checked>Barcode</label>
+        <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="capQR">QR code</label>
+        <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="capCut" checked>Auto-cut</label>
+        <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="capCashDrawer" checked>Cash drawer</label>
+        <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="capBold" checked>Bold</label>
+        <label class="flex cursor-pointer items-center gap-2"><input type="checkbox" class="check" id="capUnderline" checked>Underline</label>
+      </div>
+    </details>
+  </form>
+  <div class="dlg-foot">
+    <button class="btn btn-secondary" data-close>Cancel</button>
+    <button class="btn btn-primary" type="submit" form="printerForm"><span data-icon="check"></span>Save printer</button>
+  </div>
+</dialog>
+
+<!-- ═══ Confirm ═══ -->
+<dialog class="dlg max-w-md" id="confirmDialog" aria-labelledby="confirmTitle">
+  <div class="flex gap-4 px-6 pt-6 pb-5">
+    <div class="grid size-10 shrink-0 place-items-center rounded-full" id="confirmIcon"></div>
+    <div class="min-w-0">
+      <h2 class="font-display text-base font-semibold" id="confirmTitle"></h2>
+      <p class="mt-1.5 text-[13px] leading-relaxed whitespace-pre-line text-fg-2" id="confirmMessage"></p>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn btn-secondary" id="confirmCancel">Cancel</button>
+    <button class="btn" id="confirmOk">OK</button>
+  </div>
+</dialog>
+
+<!-- A manual popover, so toasts sit in the top layer above an open dialog's backdrop. -->
+<div class="pointer-events-none fixed inset-auto right-4 bottom-4 m-0 flex w-[min(420px,calc(100vw-2rem))] flex-col gap-2 overflow-visible border-0 bg-transparent p-0" id="toasts" popover="manual" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+// ── Connection ────────────────────────────────────────────────────────────────
+
+let API = window.location.origin;
+if (window.location.protocol === 'file:') {
+  API = 'http://127.0.0.1:9100';
+}
+
+// When the dashboard is opened as a local file it has no origin to infer the
+// port from, so probe the range the service falls back through and confirm the
+// responder really is this service rather than something else on that port.
+async function discoverPort() {
+  if (window.location.protocol !== 'file:') return;
+  for (let i = 0; i < 11; i++) {
+    const url = `http://127.0.0.1:${9100 + i}`;
+    try {
+      const r = await fetch(url + '/health', { signal: AbortSignal.timeout(600) });
+      if (!r.ok) continue;
+      const body = await r.json().catch(() => null);
+      if (body && body.service && body.service !== 'xp-thermal-service') continue;
+      API = url;
+      return;
+    } catch { /* nothing on this port */ }
+  }
+}
+
+let __API_KEY = window.__XP_API_KEY__ || '';
+
+async function fetchApiKey() {
+  if (__API_KEY) return;
+  try {
+    const res = await fetch(API + '/api/auth/local-token');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.apiKey) __API_KEY = data.apiKey;
+    }
+  } catch { /* the service is restarting; the next call retries */ }
+}
+
+async function api(method, path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (__API_KEY) headers['X-API-Key'] = __API_KEY;
+  const opts = { method, headers };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(API + path, opts);
+  if (res.status === 401) {
+    await fetchApiKey();
+    if (__API_KEY) {
+      headers['X-API-Key'] = __API_KEY;
+      const retry = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      return retry.json();
+    }
+  }
+  return res.json();
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+/** Escape for both text and attribute values. */
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+const $ = (id) => document.getElementById(id);
+
+const ICONS = {
+  overview: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/>',
+  jobs: '<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M8 7h8M8 11h8M8 15h5"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+  settings: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+  sliders: '<path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  plus: '<path d="M5 12h14M12 5v14"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  checkCircle: '<circle cx="12" cy="12" r="10"/><path d="m8.5 12 2.5 2.5 5-5"/>',
+  alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/>',
+  alertCircle: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
+  pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+  play: '<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5Z"/>',
+  trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/>',
+  wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  pulse: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  plug: '<path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
+  drawer: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+  external: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+  sparkles: '<path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/><path d="M19 3v4M21 5h-4"/>',
+  wifi: '<path d="M12 20h.01M2 8.82a15 15 0 0 1 20 0M5 12.86a10 10 0 0 1 14 0M8.5 16.43a5 5 0 0 1 7 0"/>',
+  usb: '<path d="M10 7v3M14 7v3M8 3h8v8a4 4 0 0 1-8 0V3zM12 15v6"/>',
+  arrowUp: '<circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/>',
+  import: '<path d="M12 3v12M8 11l4 4 4-4"/><path d="M8 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-4"/>',
+  more: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+  server: '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
+  ban: '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+  power: '<path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.77.04"/>'
+};
+
+function icon(name, cls = '') {
+  return `<svg class="i ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+}
+
+/** Fill static `data-icon` placeholders in the markup. */
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-icon]').forEach((el) => {
+    el.outerHTML = icon(el.dataset.icon, el.className);
+  });
+}
+
+// The Thermal Bridge mark, in the XenithPulse palette. Same geometry as
+// assets/icon.ico (scripts/make-icon.mjs).
+const LOGO = '<rect x="4" y="4" width="248" height="248" rx="52" fill="#090e0c" stroke="#34d399" stroke-opacity=".22" stroke-width="5"/>'
+  + '<g fill="none" stroke="#34d399" stroke-linecap="round"><path d="M 35.7 112 A 104 104 0 0 1 220.3 112" stroke-width="18"/><path d="M 128 56 V 98" stroke-width="12"/></g>'
+  + '<path d="M84 98 H172 V214 L161 200 L150 214 L139 200 L128 214 L117 200 L106 214 L95 200 L84 214 Z" fill="#e9f0ed"/>'
+  + '<g stroke="#090e0c" stroke-width="10" stroke-linecap="round"><path d="M102 126 H154 M102 150 H154 M102 174 H136"/></g>';
+
+const TOAST_STYLE = {
+  success: { icon: 'checkCircle', cls: 'text-ok' },
+  error: { icon: 'alertCircle', cls: 'text-bad' },
+  warn: { icon: 'alert', cls: 'text-warn' },
+  info: { icon: 'info', cls: 'text-info' }
+};
+
+function toast(msg, type = 'success') {
+  const style = TOAST_STYLE[type] || TOAST_STYLE.success;
+  const el = document.createElement('div');
+  el.className = 'pointer-events-auto flex items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 text-[13px] text-fg shadow-xl animate-toast';
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  el.innerHTML = `<span class="mt-px ${style.cls}">${icon(style.icon)}</span><span class="min-w-0 flex-1 leading-relaxed">${esc(msg)}</span>`;
+  const box = $('toasts');
+  box.appendChild(el);
+  // Showing it again moves it to the top of the top layer, above any dialog
+  // opened since.
+  if (box.showPopover) {
+    if (box.matches(':popover-open')) box.hidePopover();
+    box.showPopover();
+  }
+  setTimeout(() => {
+    el.style.transition = 'opacity 200ms';
+    el.style.opacity = '0';
+    setTimeout(() => {
+      el.remove();
+      if (!box.children.length && box.hidePopover && box.matches(':popover-open')) box.hidePopover();
+    }, 220);
+  }, type === 'error' ? 6000 : 3500);
+}
+
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
+}
+
+function formatAgo(ts) {
+  if (!ts) return 'Never';
+  const diff = Date.now() - ts;
+  if (diff < 45000) return 'Just now';
+  if (diff < 3600000) return Math.max(1, Math.floor(diff / 60000)) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  return new Date(ts).toLocaleDateString();
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const k = 1024, u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(n) / Math.log(k));
+  return (n / Math.pow(k, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+
+function emptyState(iconName, title, text, action = '') {
+  return `<div class="flex flex-col items-center px-6 py-10 text-center">
+    <div class="grid size-12 place-items-center rounded-full bg-raised text-fg-3">${icon(iconName, 'size-5')}</div>
+    <div class="mt-3 font-medium">${esc(title)}</div>
+    ${text ? `<p class="mt-1 max-w-sm text-[13px] text-fg-3">${esc(text)}</p>` : ''}
+    ${action ? `<div class="mt-4 flex flex-wrap justify-center gap-2">${action}</div>` : ''}
+  </div>`;
+}
+
+function statTile(label, value, sub, iconName, tone = '') {
+  const toneCls = { ok: 'bg-ok/10 text-ok', warn: 'bg-warn/10 text-warn', bad: 'bg-bad/10 text-bad', info: 'bg-info/10 text-info' }[tone] || 'bg-raised text-fg-3';
+  return `<div class="card p-4">
+    <div class="flex items-center justify-between gap-2">
+      <span class="text-xs font-medium text-fg-2">${esc(label)}</span>
+      <span class="grid size-7 place-items-center rounded-lg ${toneCls}">${icon(iconName, 'size-3.5')}</span>
+    </div>
+    <div class="mt-2 font-display text-2xl font-semibold tracking-tight tabular-nums">${value}</div>
+    ${sub ? `<div class="mt-0.5 truncate text-xs text-fg-3">${sub}</div>` : ''}
+  </div>`;
+}
+
+// ── Dialogs ───────────────────────────────────────────────────────────────────
+
+function openDialog(id) {
+  const d = $(id);
+  if (!d.open) d.showModal();
+}
+
+function closeDialog(id) {
+  const d = $(id);
+  if (d.open) d.close();
+}
+
+/** A styled confirm(). Resolves true when the operator confirms. */
+function confirmDialog({ title, message, confirmLabel = 'Continue', danger = false }) {
+  return new Promise((resolve) => {
+    const d = $('confirmDialog');
+    $('confirmTitle').textContent = title;
+    $('confirmMessage').textContent = message || '';
+    $('confirmIcon').className = 'grid size-10 shrink-0 place-items-center rounded-full ' + (danger ? 'bg-bad/10 text-bad' : 'bg-accent/10 text-accent');
+    $('confirmIcon').innerHTML = icon(danger ? 'alert' : 'info', 'size-5');
+    const ok = $('confirmOk');
+    ok.className = 'btn ' + (danger ? 'btn-destructive' : 'btn-primary');
+    ok.textContent = confirmLabel;
+    const finish = (value) => {
+      ok.onclick = null;
+      $('confirmCancel').onclick = null;
+      d.onclose = null;
+      if (d.open) d.close();
+      resolve(value);
+    };
+    ok.onclick = () => finish(true);
+    $('confirmCancel').onclick = () => finish(false);
+    d.onclose = () => finish(false);
+    d.showModal();
+    ok.focus();
+  });
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+function savedTheme() {
+  try { return localStorage.getItem('tb-theme') || 'system'; } catch { return 'system'; }
+}
+
+function applyTheme(choice) {
+  try {
+    if (choice === 'system') localStorage.removeItem('tb-theme');
+    else localStorage.setItem('tb-theme', choice);
+  } catch { /* storage blocked: the choice lasts for this visit */ }
+  const dark = choice === 'dark' || (choice === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  // Switch in one frame: without this every button and row would fade
+  // between themes on its own colour transition.
+  const root = document.documentElement;
+  root.classList.add('tb-instant');
+  root.classList.toggle('dark', dark);
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('tb-instant')));
+  const glyph = icon(choice === 'dark' ? 'moon' : choice === 'light' ? 'sun' : 'monitor');
+  document.querySelectorAll('#themeButton, [data-theme-icon]').forEach((b) => {
+    b.innerHTML = glyph;
+    b.title = `Theme: ${choice[0].toUpperCase()}${choice.slice(1)}`;
+  });
+  document.querySelectorAll('[data-theme-choice]').forEach((b) => {
+    b.setAttribute('aria-selected', String(b.dataset.themeChoice === choice));
+  });
+}
+
+function cycleTheme() {
+  const order = ['system', 'light', 'dark'];
+  applyTheme(order[(order.indexOf(savedTheme()) + 1) % order.length]);
+}
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (savedTheme() === 'system') applyTheme('system');
+});
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+
+const PAGES = {
+  overview: { title: 'Overview', subtitle: 'Whether printing works right now, at a glance.', icon: 'overview' },
+  printers: { title: 'Printers', subtitle: 'Each printer, what it is for, and how to fix it when it is not ready.', icon: 'printer' },
+  jobs: { title: 'Jobs', subtitle: 'Everything sent to print, and anything that did not make it.', icon: 'jobs' },
+  websites: { title: 'Websites', subtitle: 'Which websites may print through this computer.', icon: 'globe' },
+  backup: { title: 'Backup', subtitle: 'Database backups for the POS on this computer.', icon: 'database' },
+  settings: { title: 'Settings', subtitle: 'Startup, updates, connection and security.', icon: 'settings' }
+};
+
+// showBackup stays null until /api/app/info says which mode this is.
+const state = { page: 'overview', settingsTab: 'general', showBackup: null, counts: { jobs: 0, websites: 0 } };
+
+/** Update a nav badge, re-rendering the nav only when the number changed. */
+function setCount(key, n) {
+  if (state.counts[key] === n) return;
+  state.counts[key] = n;
+  renderNav();
+}
+
+/**
+ * Replace an element's markup only when it changed. Most of the page is
+ * re-rendered on a timer; rewriting identical markup would restart the
+ * status pulses and drop hover state every few seconds.
+ */
+function setHTML(el, html) {
+  if (typeof el === 'string') el = $(el);
+  if (el.__html === html) return;
+  el.__html = html;
+  el.innerHTML = html;
+}
+
+function renderNav() {
+  const items = Object.entries(PAGES).filter(([id]) => id !== 'backup' || state.showBackup === true);
+  const count = (id) => {
+    const n = state.counts[id] || 0;
+    if (!n) return '';
+    const tone = id === 'jobs' ? 'bg-bad text-white' : 'bg-warn text-white dark:text-ink';
+    return `<span class="nav-count ${tone}">${n > 99 ? '99+' : n}</span>`;
+  };
+  $('sideNav').innerHTML = items.map(([id, p]) => `
+    <button class="nav-item" data-nav="${id}" ${state.page === id ? 'aria-current="page"' : ''}>${icon(p.icon)}<span>${esc(p.title)}</span>${count(id)}</button>`).join('');
+  $('topNav').innerHTML = items.map(([id, p]) => `
+    <button class="btn btn-sm ${state.page === id ? 'btn-secondary' : 'btn-ghost'}" data-nav="${id}">${esc(p.title)}${count(id)}</button>`).join('');
+}
+
+function showPage(name) {
+  if (!PAGES[name] || (name === 'backup' && state.showBackup === false)) name = 'overview';
+  const changed = state.page !== name;
+  state.page = name;
+  document.querySelectorAll('.page').forEach((p) => {
+    const active = p.id === 'page-' + name;
+    p.hidden = !active;
+    if (active && changed) {
+      p.classList.remove('animate-fade');
+      void p.offsetWidth;
+      p.classList.add('animate-fade');
+    }
+  });
+  $('pageTitle').textContent = PAGES[name].title;
+  $('pageSubtitle').textContent = PAGES[name].subtitle;
+  document.title = name === 'overview' ? 'Thermal Bridge' : `${PAGES[name].title} · Thermal Bridge`;
+  renderNav();
+  renderNotices();
+  if (changed) $('main').scrollTop = 0;
+
+  // Fresh data on arrival rather than at the next poll; the rest are not on
+  // the poll at all.
+  if (changed && (name === 'jobs' || name === 'overview')) { loadJobs(); loadQueueStats(); }
+  if (name === 'backup') loadBackup();
+  if (name === 'websites') loadOrigins();
+  if (name === 'settings') { loadConfig(); loadSystemInfo(); }
+
+  const hash = '#' + name;
+  if (window.location.hash !== hash && !(name === 'settings' && window.location.hash === '#updates')) {
+    history.replaceState(null, '', hash);
+  }
+}
+
+function showSettingsTab(tab) {
+  state.settingsTab = tab;
+  document.querySelectorAll('#settingsTabs [data-tab]').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === tab)));
+  document.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
+}
+
+// Hash routes. The tray opens #printers and #updates; older links may use
+// #queue or #system, which now live inside Jobs and Settings → About.
+function handleRoute() {
+  const hash = window.location.hash.replace('#', '') || 'overview';
+  if (hash === 'updates') {
+    showPage('settings');
+    showSettingsTab('general');
+    checkForUpdates();
+    return;
+  }
+  if (hash === 'system') {
+    showPage('settings');
+    showSettingsTab('about');
+    return;
+  }
+  showPage(hash === 'queue' ? 'jobs' : hash);
+}
+window.addEventListener('hashchange', handleRoute);
+
+// ── Health and the status banner ──────────────────────────────────────────────
+
+let __health = null;
+
+/**
+ * Show `health.reasons` at the top of Overview.
+ *
+ * These are already plain sentences meant for a person ("None of the 2
+ * configured printer(s) are online", "1 job(s) have exhausted their retries
+ * and will never print"). Without them the operator sees "Degraded" and has to
+ * guess which of several things went wrong.
+ */
+function renderHealthReasons(d) {
+  const box = $('healthReasons');
+  const reasons = d && Array.isArray(d.reasons) ? d.reasons : [];
+  if (reasons.length === 0) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  // A dead-letter note is history, not a live fault, so it never reddens a
+  // service that is otherwise fine, matching how decideHealth treats it.
+  const tone = d.status === 'healthy' ? 'info' : d.status === 'degraded' ? 'warn' : 'bad';
+  const iconName = tone === 'info' ? 'info' : 'alert';
+  const iconCls = { info: 'text-fg-3', warn: 'text-warn', bad: 'text-bad' }[tone];
+  box.className = `callout callout-${tone}`;
+  box.innerHTML = `<span class="${iconCls}">${icon(iconName)}</span>
+    <div class="min-w-0">
+      <div class="font-medium">${d.status === 'healthy' ? 'Worth knowing' : 'Why printing is ' + (d.status === 'degraded' ? 'not fully working' : 'not working')}</div>
+      <ul class="mt-1 list-disc space-y-0.5 pl-4 text-fg-2">${reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+    </div>`;
+  box.hidden = false;
+}
+
+async function loadHealth() {
+  try {
+    const d = await api('GET', '/health');
+    __health = d;
+    document.querySelectorAll('[data-version], #footerVersion').forEach((el) => { el.textContent = d.version; });
+    renderHealthReasons(d);
+    renderStatusBanner(d);
+    renderOverviewStats();
+  } catch {
+    __health = null;
+    renderStatusBanner(null);
+  }
+}
+
+const BANNER_TONES = {
+  ok: { orb: 'bg-ok/15 text-ok', wash: 'from-ok/12', ping: 'bg-ok/30 motion-safe:animate-ping' },
+  warn: { orb: 'bg-warn/15 text-warn', wash: 'from-warn/12', ping: '' },
+  bad: { orb: 'bg-bad/15 text-bad', wash: 'from-bad/12', ping: '' }
+};
+
+/** "Running · 2 of 2 printers online · port 9100", in the colour of the verdict. */
+function renderStatusBanner(d) {
+  let tone, title, meta;
+  if (!d) {
+    tone = 'bad';
+    title = 'Not responding';
+    meta = '<span>Thermal Bridge is restarting or has stopped. This page reconnects by itself.</span>';
+  } else {
+    const port = d.port || new URL(API).port || 9100;
+    const p = d.printers || { total: 0, online: 0 };
+    tone = p.total === 0 ? 'warn' : d.status === 'healthy' ? 'ok' : d.status === 'degraded' ? 'warn' : 'bad';
+    title = d.status === 'healthy' ? 'Ready to print' : d.status === 'degraded' ? 'Running with problems' : 'Not printing';
+    if (p.total === 0) title = 'Running · no printers yet';
+    const printers = p.total === 0
+      ? 'Click “Detect printers” to find your receipt printer'
+      : `${p.online} of ${p.total} printer${p.total === 1 ? '' : 's'} online`;
+    const url = `http://127.0.0.1:${port}`;
+    meta = `<span class="inline-flex items-center gap-1.5">${icon('printer', 'size-3.5 text-fg-3')}${esc(printers)}</span>
+      <span class="inline-flex flex-wrap items-center gap-x-1.5">${icon('globe', 'size-3.5 text-fg-3')}Web apps print to
+        <button class="inline-flex items-center gap-1 rounded-md px-1 font-mono text-fg hover:bg-hover" data-action="copyUrl" data-url="${esc(url)}" title="Copy">${esc(url)}${icon('copy', 'size-3 text-fg-3')}</button></span>`;
+    $('footerUrl').textContent = url;
+  }
+  const t = BANNER_TONES[tone];
+  $('sbOrb').className = `relative grid size-12 shrink-0 place-items-center rounded-full ${t.orb}`;
+  $('sbPing').className = `absolute inset-0 rounded-full ${t.ping}`;
+  $('sbWash').className = `pointer-events-none absolute inset-0 bg-linear-to-r ${t.wash} via-transparent to-transparent`;
+  $('sbTitle').textContent = title;
+  setHTML('sbSub', meta);
+}
+
+let __queue = null;
+
+function renderOverviewStats() {
+  const h = __health;
+  if (!h) return;
+  const p = h.printers || { total: 0, online: 0 };
+  const waiting = (h.queue && (h.queue.pending + (h.queue.processing || 0))) || 0;
+  const printed = __queue ? __queue.queue.completed : null;
+  const failed = __queue ? (__queue.queue.failed || 0) : (h.queue && h.queue.failed) || 0;
+  setHTML('overviewStats', [
+    statTile('Printers online', `${p.online}<span class="text-base font-medium text-fg-3">/${p.total}</span>`,
+      p.total === 0 ? 'None set up yet' : p.online === p.total ? 'All ready' : `${p.total - p.online} not ready`,
+      'printer', p.total === 0 ? '' : p.online === p.total ? 'ok' : 'warn'),
+    statTile('Waiting to print', String(waiting), waiting ? 'In the queue now' : 'Nothing queued', 'layers', waiting ? 'info' : ''),
+    statTile('Printed', printed == null ? '…' : String(printed), failed ? `${failed} failed` : 'No failures', 'checkCircle', failed ? 'bad' : 'ok'),
+    statTile('Running for', esc(formatUptime(h.uptime || 0)), h.mode === 'service' ? 'As a Windows service' : 'Since it last started', 'clock')
+  ].join(''));
+}
+
+/** Queue a test page on the default printer. */
+async function printTestPage() {
+  const printers = window.__configuredPrinters || [];
+  if (printers.length === 0) {
+    toast('Set up a printer first', 'warn');
+    openDiscover();
+    return;
+  }
+  try {
+    const d = await api('POST', '/api/print', {
+      idempotencyKey: 'dashboard_test_' + Date.now(),
+      templateType: 'test',
+      payload: { message: 'Test page from the Thermal Bridge dashboard' }
+    });
+    if (d.error) toast(d.message || d.error, 'error');
+    else toast('Test page sent to the default printer');
+    setTimeout(loadJobs, 1500);
+  } catch {
+    toast('Could not send the test page', 'error');
+  }
+}
+
+async function copyUrl(btn) {
+  try {
+    await navigator.clipboard.writeText(btn.dataset.url);
+    toast('Copied ' + btn.dataset.url, 'info');
+  } catch {
+    toast('Copy is blocked here. The address is ' + btn.dataset.url, 'info');
+  }
+}
+
+// ── App: version, Start with Windows, updates, websites, migration ────────────
+
+let __app = null;
+
+async function loadAppInfo() {
+  try {
+    __app = await api('GET', '/api/app/info');
+  } catch {
+    __app = null;
+  }
+  if (!__app || __app.error) {
+    // Older service, or the page is open from another computer: keep Backup
+    // reachable, as it always was.
+    if (state.showBackup === null) {
+      state.showBackup = true;
+      renderNav();
+    }
+    return;
+  }
+
+  // The backup page manages Pulsar POS's database; it has no place in the app.
+  state.showBackup = __app.mode !== 'user';
+  if (!state.showBackup && state.page === 'backup') showPage('overview');
+  renderNav();
+
+  const modeLabel = { user: 'App for this Windows user', service: 'Windows service', legacy: 'Started from source' }[__app.mode] || __app.mode;
+  const row = (k, v) => `<dt class="border-b border-line px-6 py-3 text-fg-3 sm:border-b">${k}</dt><dd class="min-w-0 border-b border-line px-6 py-3 [overflow-wrap:anywhere] sm:pl-0">${v}</dd>`;
+  $('appAbout').innerHTML =
+    row('Version', esc(__app.version))
+    + row('Running as', esc(modeLabel) + (__app.portable ? ' · portable copy' : ''))
+    + row('Settings and logs', `<span class="font-mono text-[12px]">${esc(__app.dataDir)}</span>`)
+    + row('Address', `<span class="font-mono text-[12px]">${esc(API)}</span>`);
+  $('aboutChips').innerHTML = `<span class="chip">v${esc(__app.version)}</span><span class="chip">${esc(modeLabel)}</span>${__app.portable ? '<span class="chip">Portable</span>' : ''}`;
+  $('aboutLinks').innerHTML = `
+    <a class="btn btn-secondary btn-sm" href="${esc(__app.homepageUrl)}" target="_blank" rel="noopener">xenithpulse.com${icon('external', 'size-3.5')}</a>
+    <a class="btn btn-secondary btn-sm" href="${esc(__app.releasesUrl)}" target="_blank" rel="noopener">Releases${icon('external', 'size-3.5')}</a>`;
+
+  $('startupRow').hidden = !__app.startup.available;
+  $('startupToggle').checked = !!__app.startup.enabled;
+  renderNotices();
+}
+
+async function setStartup(enabled) {
+  const d = await api('PUT', '/api/app/startup', { enabled });
+  if (d.error) {
+    toast(d.message || 'Could not change the startup setting', 'error');
+    $('startupToggle').checked = !enabled;
+    return;
+  }
+  toast(enabled ? 'Thermal Bridge will start with Windows' : 'Thermal Bridge will not start with Windows');
+}
+
+let __origins = { allowed: [], blocked: [], pending: [] };
+let __updates = null;
+
+async function loadOrigins() {
+  try {
+    const d = await api('GET', '/api/origins');
+    if (!d.error) __origins = d;
+  } catch { /* keep the last known lists */ }
+  setCount('websites', (__origins.pending || []).length);
+  renderNotices();
+  renderOriginLists();
+}
+
+async function decideOrigin(origin, decision) {
+  const d = await api('POST', '/api/origins/decision', { origin, decision });
+  if (d.error) {
+    toast(d.message || 'Could not save that', 'error');
+    return false;
+  }
+  __origins = { ...__origins, allowed: d.allowed, blocked: d.blocked, pending: d.pending };
+  setCount('websites', (__origins.pending || []).length);
+  toast(decision === 'allow' ? `${origin} can now print` : decision === 'block' ? `${origin} is blocked` : `${origin} removed`);
+  renderNotices();
+  renderOriginLists();
+  return true;
+}
+
+function originRow(origin, sub, actions) {
+  return `<li class="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+    <div class="flex min-w-0 items-center gap-3">
+      <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-raised text-fg-3">${icon('globe', 'size-4')}</span>
+      <div class="min-w-0"><div class="truncate font-mono text-[13px]">${esc(origin)}</div>${sub ? `<div class="text-xs text-fg-3">${sub}</div>` : ''}</div>
+    </div>
+    <div class="flex gap-2">${actions}</div>
+  </li>`;
+}
+
+function renderOriginLists() {
+  const pending = __origins.pending || [];
+  $('pendingCard').hidden = pending.length === 0;
+  $('pendingList').innerHTML = pending.map((p) => originRow(p.origin,
+    `Tried ${p.attempts} time${p.attempts === 1 ? '' : 's'} · last ${esc(formatAgo(Date.parse(p.lastSeen)))}`,
+    `<button class="btn btn-secondary btn-sm" data-origin="${esc(p.origin)}" data-decision="block">${icon('ban')}Block</button>
+     <button class="btn btn-primary btn-sm" data-origin="${esc(p.origin)}" data-decision="allow">${icon('check')}Allow</button>`)).join('');
+
+  const allowed = __origins.allowed || [];
+  const blocked = __origins.blocked || [];
+  $('allowedCount').textContent = allowed.length;
+  $('blockedCount').textContent = blocked.length;
+  $('allowedList').innerHTML = allowed.length
+    ? allowed.map((o) => originRow(o, o.includes('*') ? 'Wildcard' : '',
+        `<button class="btn btn-ghost btn-sm" data-origin="${esc(o)}" data-decision="remove">Remove</button>`)).join('')
+    : `<li>${emptyState('globe', 'No websites added', 'Websites appear here once you allow them.')}</li>`;
+  $('blockedList').innerHTML = blocked.length
+    ? blocked.map((o) => originRow(o, '', `<button class="btn btn-ghost btn-sm" data-origin="${esc(o)}" data-decision="remove">Unblock</button>`)).join('')
+    : `<li>${emptyState('ban', 'Nothing blocked', 'Blocked websites can never print, even if they ask again.')}</li>`;
+}
+
+async function addOrigin(e) {
+  e.preventDefault();
+  const input = $('newOrigin');
+  let value = input.value.trim();
+  if (!value) return;
+  if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+  let origin;
+  try {
+    origin = new URL(value).origin;
+  } catch {
+    toast(`“${input.value.trim()}” is not a website address. Try https://pos.example.com`, 'error');
+    return;
+  }
+  if (await decideOrigin(origin, 'allow')) input.value = '';
+}
+
+function notice(iconName, tone, body, actions) {
+  const toneCls = { warn: 'bg-warn/10 text-warn', ok: 'bg-ok/10 text-ok', info: 'bg-info/10 text-info' }[tone];
+  return `<div class="card flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+    <div class="flex min-w-0 items-start gap-3">
+      <span class="grid size-9 shrink-0 place-items-center rounded-lg ${toneCls}">${icon(iconName)}</span>
+      <div class="min-w-0 text-[13px]">${body}</div>
+    </div>
+    <div class="flex flex-wrap gap-2">${actions}</div>
+  </div>`;
+}
+
+/** Things waiting on the operator, shown under the status banner on every page. */
+function renderNotices() {
+  const html = [];
+
+  // The Websites page lists these itself, with more detail.
+  for (const p of state.page === 'websites' ? [] : __origins.pending || []) {
+    html.push(notice('globe', 'warn',
+      `<div><span class="font-mono text-fg">${esc(p.origin)}</span> wants to print</div>
+       <div class="mt-0.5 text-fg-3">Allow it only if this is your POS or ordering website.</div>`,
+      `<button class="btn btn-secondary btn-sm" data-origin="${esc(p.origin)}" data-decision="block">Block</button>
+       <button class="btn btn-primary btn-sm" data-origin="${esc(p.origin)}" data-decision="allow">Allow</button>`));
+  }
+
+  const legacy = __app && __app.legacy;
+  if (legacy && !legacy.handled && (legacy.printerCount > 0 || legacy.serviceInstalled)) {
+    const found = legacy.printerCount > 0
+      ? `<div class="font-medium text-fg">${legacy.printerCount} printer${legacy.printerCount === 1 ? '' : 's'} found from XP Thermal Service. Import them?</div>`
+      : '';
+    const service = legacy.serviceInstalled
+      ? `<div class="${found ? 'mt-0.5 text-fg-3' : 'font-medium text-fg'}">An older XP Thermal Service is installed. It can keep running, or remove it from Windows Services.</div>`
+      : '';
+    html.push(notice('import', 'info', found + service,
+      `<button class="btn btn-ghost btn-sm" data-action="dismissLegacy">Not now</button>
+       ${legacy.printerCount > 0 ? '<button class="btn btn-primary btn-sm" data-action="importLegacy">Import printers</button>' : ''}`));
+  }
+
+  if (__updates && __updates.available && __updates.latest) {
+    html.push(notice('arrowUp', 'ok',
+      `<div class="font-medium text-fg">Thermal Bridge ${esc(__updates.latest.version)} is available</div>
+       <div class="mt-0.5 text-fg-3">You have ${esc(__updates.currentVersion)}.</div>`,
+      `<a class="btn btn-primary btn-sm" href="#updates">See update</a>`));
+  }
+
+  setHTML('notices', html.join(''));
+}
+
+async function importLegacy() {
+  const d = await api('POST', '/api/app/legacy/import');
+  if (d.error) {
+    toast(d.message || 'Import failed', 'error');
+    return;
+  }
+  const skipped = (d.skipped || []).length;
+  toast(`Imported ${d.imported.length} printer(s)` + (skipped ? `, skipped ${skipped}` : ''));
+  if (__app && __app.legacy) __app.legacy.handled = true;
+  renderNotices();
+  loadPrinters();
+}
+
+async function dismissLegacy() {
+  await api('POST', '/api/app/legacy/dismiss');
+  if (__app && __app.legacy) __app.legacy.handled = true;
+  renderNotices();
+}
+
+async function checkForUpdates() {
+  const btn = $('btnCheckUpdates');
+  btn.disabled = true;
+  $('updateStatus').innerHTML = `<div class="flex items-center gap-2 text-fg-2">${icon('refresh', 'size-4 motion-safe:animate-spin')}Checking for updates…</div>`;
+  try {
+    __updates = await api('POST', '/api/app/updates/check');
+  } catch {
+    __updates = { error: 'Thermal Bridge did not answer.' };
+  } finally {
+    btn.disabled = false;
+  }
+  renderUpdateStatus();
+  renderNotices();
+}
+
+function renderUpdateStatus() {
+  const box = $('updateStatus');
+  const u = __updates;
+  if (!u) return;
+  if (u.error) {
+    box.innerHTML = `<div class="callout callout-warn"><span class="text-warn">${icon('alert')}</span><div>Could not check for updates: ${esc(u.error)}</div></div>`;
+    return;
+  }
+  if (!u.available) {
+    box.innerHTML = `<div class="flex items-center gap-3"><span class="grid size-9 place-items-center rounded-full bg-ok/10 text-ok">${icon('check')}</span>
+      <div><div class="font-medium">You are up to date</div><div class="text-[13px] text-fg-3">Version ${esc(u.currentVersion)} is the latest.</div></div></div>`;
+    return;
+  }
+
+  const l = u.latest;
+  const dl = u.download;
+  const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
+  let action = '';
+  if (u.installKind === 'none') {
+    action = `<a class="btn btn-secondary btn-sm" href="${esc((__app && __app.releasesUrl) || '#')}" target="_blank" rel="noopener">Download from the releases page${icon('external', 'size-3.5')}</a>`;
+  } else if (dl.state === 'idle' || dl.state === 'failed') {
+    action = `<button class="btn btn-primary btn-sm" data-action="downloadUpdate">${icon('download')}Download ${esc(l.version)}</button>`
+      + (dl.error ? `<p class="mt-2 text-xs text-bad">${esc(dl.error)}</p>` : '');
+  } else if (dl.state === 'downloading') {
+    const pct = dl.total ? Math.min(100, Math.round((dl.received / dl.total) * 100)) : 0;
+    action = `<div class="max-w-md">
+      <div class="mb-1.5 flex justify-between text-xs text-fg-2"><span>Downloading…</span><span class="tabular-nums">${mb(dl.received)} of ${mb(dl.total)}</span></div>
+      <div class="h-2 overflow-hidden rounded-full bg-raised"><div class="h-full rounded-full bg-accent transition-[width] duration-500" style="width:${pct}%"></div></div>
+    </div>`;
+  } else if (dl.state === 'ready') {
+    action = `<p class="mb-3 flex items-center gap-2 text-xs text-fg-2">${icon('shield', 'size-3.5 text-ok')}Checksum verified. ${esc(dl.signatureNote || '')}</p>`
+      + `<button class="btn btn-primary btn-sm" data-action="installUpdate">${icon('arrowUp')}${u.installKind === 'portable' ? 'Show the new exe' : 'Install update'}</button>`;
+  }
+  box.innerHTML = `
+    <div class="flex items-start gap-3">
+      <span class="grid size-9 shrink-0 place-items-center rounded-full bg-accent/10 text-accent">${icon('arrowUp')}</span>
+      <div class="min-w-0 flex-1">
+        <div class="font-medium">Version ${esc(l.version)} is available</div>
+        <div class="text-[13px] text-fg-3">You have ${esc(u.currentVersion)}.</div>
+        ${l.notes ? `<pre class="mt-3 max-h-48 overflow-auto rounded-lg border border-line bg-raised/50 p-3 font-sans text-xs leading-relaxed whitespace-pre-wrap text-fg-2">${esc(l.notes)}</pre>` : ''}
+        <div class="mt-4">${action}</div>
+      </div>
+    </div>`;
+}
+
+async function downloadUpdate() {
+  const d = await api('POST', '/api/app/updates/download');
+  if (d.error) {
+    toast(d.message || 'Download failed', 'error');
+    return;
+  }
+  __updates = d;
+  renderUpdateStatus();
+  // Poll until the download settles; the page stays usable meanwhile.
+  const timer = setInterval(async () => {
+    __updates = await api('GET', '/api/app/updates');
+    renderUpdateStatus();
+    if (__updates.download.state !== 'downloading') clearInterval(timer);
+  }, 1000);
+}
+
+async function installUpdate() {
+  const d = await api('POST', '/api/app/updates/install');
+  toast(d.message || (d.error ? 'Could not start the update' : 'Done'), d.error ? 'error' : 'success');
+}
+
+// ── Queue ─────────────────────────────────────────────────────────────────────
+
+function queueBar(q) {
+  const parts = [
+    ['Printed', q.completed || 0, 'bg-ok'],
+    ['Printing', q.processing || 0, 'bg-info'],
+    ['Waiting', q.pending || 0, 'bg-warn'],
+    ['Failed', q.failed || 0, 'bg-bad']
+  ];
+  const total = parts.reduce((s, p) => s + p[1], 0);
+  const bar = total
+    ? parts.filter((p) => p[1] > 0).map((p) => `<div class="${p[2]} h-full transition-[width] duration-500" style="width:${((p[1] / total) * 100).toFixed(2)}%" title="${p[0]}: ${p[1]}"></div>`).join('')
+    : '';
+  const legend = parts.map((p) => `<div class="flex items-center justify-between gap-3">
+      <span class="flex items-center gap-2 text-fg-2"><span class="size-2 rounded-full ${p[2]}"></span>${p[0]}</span>
+      <span class="font-medium tabular-nums">${p[1]}</span></div>`).join('');
+  return { bar: `<div class="flex h-2 gap-px overflow-hidden rounded-full bg-raised">${bar}</div>`, legend };
+}
+
+function renderQueue(d) {
+  __queue = d;
+  const q = d.queue;
+  const { bar, legend } = queueBar(q);
+  const paused = !!d.isPaused;
+
+  setHTML('overviewQueue', `${bar}<div class="mt-4 grid gap-2.5 text-[13px]">${legend}</div>`);
+  setHTML('overviewQueueState', paused
+    ? `<span class="text-warn">Printing is paused</span>`
+    : 'Jobs waiting, printing and done');
+
+  setHTML('queueStats', `
+    ${paused ? `<div class="callout callout-warn mb-5"><span class="text-warn">${icon('pause')}</span><div><div class="font-medium">Printing is paused</div><div class="text-fg-2">New jobs are kept in the queue and print when you resume.</div></div></div>` : ''}
+    <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      ${[['Waiting', q.pending, 'text-warn'], ['Printing', q.processing, 'text-info'], ['Printed', q.completed, 'text-ok'], ['Failed', q.failed, 'text-bad']].map(([l, v, c]) => `
+        <div class="rounded-lg border border-line px-4 py-3">
+          <div class="text-xs font-medium text-fg-2">${l}</div>
+          <div class="mt-1 font-display text-xl font-semibold tabular-nums ${v ? c : ''}">${v}</div>
+        </div>`).join('')}
+    </div>
+    <div class="mt-5">${bar}</div>`);
+  $('queueState').textContent = paused ? 'Paused. Jobs wait until you resume.' : 'Jobs are printed in the order they arrive';
+
+  const btn = $('btnQueueToggle');
+  setHTML(btn, paused ? `${icon('play')}Resume printing` : `${icon('pause')}Pause printing`);
+  btn.className = paused ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm';
+  renderOverviewStats();
+}
+
+async function loadQueueStats() {
+  try {
+    renderQueue(await api('GET', '/api/queue/stats'));
+  } catch { /* the banner already says the service is unreachable */ }
+}
+
+async function toggleQueue() {
+  const paused = __queue && __queue.isPaused;
+  await api('POST', paused ? '/api/queue/resume' : '/api/queue/pause');
+  toast(paused ? 'Printing resumed' : 'Printing paused. New jobs will wait.', paused ? 'success' : 'warn');
+  loadQueueStats();
+}
+
+async function clearFailedJobs() {
+  const ok = await confirmDialog({
+    title: 'Clear all failed jobs?',
+    message: 'They are removed from the queue and history. This cannot be undone.',
+    confirmLabel: 'Clear failed jobs',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const d = await api('POST', '/api/jobs/clear-failed');
+    toast(`Cleared ${d.count} failed job${d.count === 1 ? '' : 's'}`);
+    loadQueueStats();
+    loadJobs();
+  } catch {
+    toast('Could not clear the failed jobs', 'error');
+  }
+}
+
+// ── System info (Settings → About) ────────────────────────────────────────────
+
+async function loadSystemInfo() {
+  try {
+    const d = await api('GET', '/api/system/info');
+    const conn = await api('GET', '/api/system/connections');
+    const tile = (label, value) => `<div class="rounded-lg border border-line px-4 py-3">
+      <div class="text-xs font-medium text-fg-2">${label}</div>
+      <div class="mt-1 truncate font-medium tabular-nums">${esc(value)}</div></div>`;
+    $('systemStats').innerHTML = [
+      tile('Memory in use', `${d.memory.heapUsed} MB`),
+      tile('Process memory', `${d.memory.rss} MB`),
+      tile('Connections', conn.activeConnections),
+      tile('Runtime', `Node.js ${d.nodeVersion.replace(/^v/, '')}`),
+      tile('Platform', `${d.platform} ${d.arch || ''}`)
+    ].join('');
+  } catch {
+    $('systemStats').innerHTML = '<p class="col-span-full text-fg-3">System information is unavailable.</p>';
+  }
+}
+
+// ── Jobs ──────────────────────────────────────────────────────────────────────
+
+const JOB_STATUS = {
+  pending: ['Waiting', 'badge-warn'],
+  queued: ['Queued', 'badge-warn'],
+  processing: ['Printing', 'badge-info'],
+  printing: ['Printing', 'badge-info'],
+  completed: ['Printed', 'badge-ok'],
+  failed: ['Failed', 'badge-bad'],
+  retry_scheduled: ['Retrying', 'badge-warn'],
+  cancelled: ['Cancelled', 'badge-neutral'],
+  dead_letter: ['Gave up', 'badge-bad']
+};
+
+// Which statuses the Jobs page is showing. Empty means every status, which is
+// the default: a list filtered to pending is empty exactly when the service is
+// healthy, and hides the jobs that will never print.
+let __jobFilter = '';
+
+function renderJobRows(jobs, full) {
+  if (!jobs || jobs.length === 0) {
+    // Say which list is empty. "No jobs" under a filter would read as
+    // "nothing has happened" when it means "nothing matched".
+    const [title, text] = !full || !__jobFilter
+      ? ['No jobs yet', 'Jobs appear here as soon as a web app sends something to print.']
+      : __jobFilter.startsWith('failed')
+        ? ['Nothing needs attention', 'No failed or abandoned jobs.']
+        : ['No jobs with this status', ''];
+    return `<tr class="hover:bg-transparent"><td colspan="${full ? 6 : 5}" class="p-0">${emptyState('jobs', title, text)}</td></tr>`;
+  }
+  return jobs.map((j) => {
+    const [label, cls] = JOB_STATUS[j.status] || [j.status, 'badge-neutral'];
+    const canRetry = j.status === 'failed' || j.status === 'dead_letter';
+    // A failed job is useless without the reason, so show it inline rather
+    // than making someone open the log file.
+    const err = j.lastError || j.error;
+    const errRow = err && full ? `<div class="mt-1.5 max-w-md text-xs leading-relaxed text-bad">${esc(err)}</div>` : '';
+    const attempts = (j.attempts ?? 0) > 1 ? `<span class="ml-2 text-[11px] text-fg-3">attempt ${esc(j.attempts)}</span>` : '';
+    const created = new Date(j.createdAt);
+    return `<tr>
+      <td class="font-mono text-xs text-fg-3">${esc(String(j.id).substring(0, 8))}</td>
+      <td class="font-medium">${esc(j.printerId)}</td>
+      <td class="text-fg-2">${esc(j.templateType)}</td>
+      <td><span class="badge ${cls}" title="${esc(j.status)}">${esc(label)}</span>${attempts}${errRow}</td>
+      <td class="whitespace-nowrap text-xs text-fg-3 ${full ? '' : 'text-right'}" title="${esc(created.toLocaleString())}">${esc(formatAgo(j.createdAt))}</td>
+      ${full ? `<td class="text-right">${canRetry ? `<button class="btn btn-secondary btn-sm" data-action="retryJob" data-id="${esc(j.id)}">${icon('refresh')}Retry</button>` : ''}</td>` : ''}
+    </tr>`;
+  }).join('');
+}
+
+async function loadJobs() {
+  try {
+    const qs = __jobFilter ? `&status=${encodeURIComponent(__jobFilter)}` : '';
+    const d = await api('GET', `/api/jobs?limit=50${qs}`);
+    setHTML('jobsTable', renderJobRows(d.jobs, true));
+
+    // Overview always shows recent activity whatever the Jobs filter is, so
+    // switching filters never silently changes another page.
+    const recent = __jobFilter ? (await api('GET', '/api/jobs?limit=5')).jobs : d.jobs;
+    setHTML('overviewJobs', renderJobRows((recent || []).slice(0, 5), false));
+
+    await refreshProblemCount();
+  } catch { /* the banner already says the service is unreachable */ }
+}
+
+/** Badge "Needs attention" and the Jobs nav item, so a stuck job is visible without a click. */
+async function refreshProblemCount() {
+  try {
+    const d = await api('GET', '/api/jobs?limit=100&status=failed,dead_letter');
+    const n = (d.jobs || []).length;
+    setHTML('jobFilterProblem', n > 0
+      ? `Needs attention <span class="rounded-full bg-bad px-1.5 text-[10px] leading-4 font-semibold text-white">${n > 99 ? '99+' : n}</span>`
+      : 'Needs attention');
+    setCount('jobs', n);
+  } catch {
+    setHTML('jobFilterProblem', 'Needs attention');
+  }
+}
+
+function setJobFilter(btn) {
+  __jobFilter = btn.dataset.filter;
+  document.querySelectorAll('#jobFilters [data-filter]').forEach((b) => b.setAttribute('aria-selected', String(b === btn)));
+  loadJobs();
+}
+
+async function retryJob(id) {
+  try {
+    await api('POST', `/api/jobs/${encodeURIComponent(id)}/retry`);
+    toast('Job scheduled to print again');
+    loadJobs();
+    loadQueueStats();
+  } catch {
+    toast('Could not retry the job', 'error');
+  }
+}
+
+// ── Printers ──────────────────────────────────────────────────────────────────
+
+const ROLE_LABELS = { receipt: 'Receipts & bills', kitchen: 'Kitchen tickets', bar: 'Bar orders', label: 'Labels' };
+
+// Plain words instead of internal status names.
+const PRINTER_STATUS = {
+  online: ['Ready', 'badge-ok', 'ok'],
+  offline: ['Not connected', 'badge-bad', 'bad'],
+  error: ['Needs attention', 'badge-warn', 'warn'],
+  paper_out: ['Out of paper', 'badge-warn', 'warn'],
+  cover_open: ['Cover open', 'badge-warn', 'warn'],
+  busy: ['Printing', 'badge-info', 'info'],
+  unknown: ['Checking…', 'badge-neutral', '']
+};
+
+function printerStatus(p) {
+  const s = (p.state && p.state.status) || 'unknown';
+  const [label, badge, tone] = PRINTER_STATUS[s] || [s, 'badge-neutral', ''];
+  return { s, label, badge, tone };
+}
+
+async function loadPrinters() {
+  try {
+    const d = await api('GET', '/api/printers');
+    renderPrinters(d.printers || []);
+  } catch { /* the banner already says the service is unreachable */ }
+}
+
+function printerCard(p) {
+  const st = printerStatus(p);
+  const caps = p.capabilities || {};
+  const ps = p.state || {};
+  const role = ROLE_LABELS[p.id] || p.name;
+  // The queue in use can differ from the configured name after the service
+  // followed a renamed or moved printer.
+  const bound = ps.boundPrinterName || p.printerName;
+  const target = p.type === 'network' ? `${p.host || ''}:${p.port || 9100}` : (bound || '-');
+  const moved = p.type !== 'network' && bound && bound !== p.printerName
+    ? `<div class="text-xs text-fg-3">followed from ${esc(p.printerName)}</div>` : '';
+  // Fall back to lastError. Some failures never produce a plain-language
+  // `reason`; a Windows queue that does not exist is the common one, and its
+  // explanation lives only in lastError.
+  const why = ps.reason || ps.lastError;
+  const toneIcon = { ok: 'bg-ok/10 text-ok', warn: 'bg-warn/10 text-warn', bad: 'bg-bad/10 text-bad', info: 'bg-info/10 text-info' }[st.tone] || 'bg-raised text-fg-3';
+
+  const problem = st.s !== 'online'
+    ? `<div class="callout ${st.tone === 'bad' ? 'callout-bad' : 'callout-warn'}">
+        <span class="${st.tone === 'bad' ? 'text-bad' : 'text-warn'}">${icon('alert')}</span>
+        <div class="min-w-0 flex-1">
+          <div class="font-medium">Not ready to print</div>
+          <div class="mt-0.5 text-fg-2">${esc(why || 'This printer is not currently usable.')}</div>
+        </div>
+        ${ps.healable ? `<button class="btn btn-primary btn-sm self-center" data-action="repairPrinter" data-id="${esc(p.id)}">${icon('wrench')}Fix this</button>` : ''}
+      </div>`
+    : ps.lastError
+      ? `<div class="callout callout-info"><span class="text-fg-3">${icon('info')}</span><div class="min-w-0"><div class="font-medium">Last error</div><div class="mt-0.5 text-fg-2">${esc(ps.lastError)}</div></div></div>`
+      : '';
+
+  const capList = [
+    caps.supportsCut && 'Auto-cut',
+    caps.supportsCashDrawer && 'Cash drawer',
+    caps.supportsBarcode && 'Barcode',
+    caps.supportsQRCode && 'QR code',
+    caps.supportsBold && 'Bold',
+    caps.supportsUnderline && 'Underline',
+    caps.supportsImage && 'Image'
+  ].filter(Boolean);
+
+  const fact = (k, v) => `<div><dt class="text-xs text-fg-3">${k}</dt><dd class="mt-0.5 font-medium tabular-nums">${v}</dd></div>`;
+  const failures = ps.consecutiveFailures || 0;
+
+  return `<article class="card">
+    <div class="flex flex-wrap items-start justify-between gap-4 p-5">
+      <div class="flex min-w-0 items-start gap-4">
+        <span class="grid size-11 shrink-0 place-items-center rounded-xl ${toneIcon}">${icon(p.type === 'network' ? 'wifi' : 'printer', 'size-5')}</span>
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="font-display text-base font-semibold tracking-tight">${esc(role)}</h3>
+            ${p.isDefault ? '<span class="chip">Default</span>' : ''}
+            ${p.enabled === false ? '<span class="chip bg-bad/10 text-bad">Disabled</span>' : ''}
+          </div>
+          <div class="mt-0.5 text-[13px] text-fg-2">${esc(p.name)}</div>
+          <div class="mt-1 flex items-center gap-1.5 font-mono text-xs text-fg-3">${icon(p.type === 'network' ? 'wifi' : 'usb', 'size-3')}${esc(target)}</div>
+          ${moved}
+        </div>
+      </div>
+      <span class="badge ${st.badge}">${esc(st.label)}</span>
+    </div>
+    ${problem ? `<div class="px-5 pb-4">${problem}</div>` : ''}
+    <dl class="grid grid-cols-2 gap-4 border-t border-line px-5 py-4 text-[13px] sm:grid-cols-4">
+      ${fact('Printer ID', `<span class="font-mono font-normal">${esc(p.id)}</span>`)}
+      ${fact('Paper', caps.maxWidth ? `${esc(caps.maxWidth)} chars` : '-')}
+      ${fact('Printed', esc(ps.totalJobsPrinted ?? 0))}
+      ${fact('Last seen', esc(formatAgo(ps.lastSeen)))}
+    </dl>
+    ${failures > 0 ? `<div class="border-t border-line px-5 py-2.5 text-xs text-bad">${failures} failed attempt${failures === 1 ? '' : 's'} in a row</div>` : ''}
+    <div class="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-raised/30 px-5 py-3">
+      <div class="flex flex-wrap gap-1.5">${capList.map((c) => `<span class="chip">${c}</span>`).join('')}</div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button class="btn btn-secondary btn-sm" data-action="testPrinter" data-id="${esc(p.id)}">${icon('printer')}Test print</button>
+        <button class="btn btn-secondary btn-sm" data-action="editPrinter" data-id="${esc(p.id)}">${icon('sliders')}Settings</button>
+        <details class="relative" data-menu>
+          <summary class="btn btn-ghost btn-sm btn-icon list-none" aria-label="More actions">${icon('more')}</summary>
+          <div class="menu">
+            ${p.type === 'usb' ? `<button class="menu-item" data-action="diagnosePrinter" data-id="${esc(p.id)}">${icon('pulse')}Details and repair</button>` : ''}
+            ${p.cashDrawer && p.cashDrawer.enabled ? `<button class="menu-item" data-action="openDrawer" data-id="${esc(p.id)}">${icon('drawer')}Open cash drawer</button>` : ''}
+            <button class="menu-item" data-action="reconnectPrinter" data-id="${esc(p.id)}">${icon('plug')}Reconnect</button>
+            <div class="my-1 h-px bg-line"></div>
+            <button class="menu-item text-bad hover:bg-bad/10 hover:text-bad" data-action="deletePrinter" data-id="${esc(p.id)}">${icon('trash')}Remove printer</button>
+          </div>
+        </details>
+      </div>
+    </div>
+  </article>`;
+}
+
+// Split out from loadPrinters so the live event stream can render pushed state
+// without another round trip.
+function renderPrinters(printers) {
+  // Kept so the setup flow can warn before repointing an existing role.
+  window.__configuredPrinters = printers;
+
+  // Keep an open "more" menu open across a live re-render.
+  const openMenu = document.querySelector('#printerCards details[open] [data-id]');
+  const openId = openMenu && openMenu.dataset.id;
+
+  if (printers.length === 0) {
+    const action = '<button class="btn btn-primary" data-action="openDiscover">' + icon('search') + 'Detect printers</button>'
+      + '<button class="btn btn-secondary" data-action="openAddPrinter">' + icon('plus') + 'Add manually</button>';
+    setHTML('printerCards', `<div class="card">${emptyState('printer', 'No printers set up yet', 'Plug in your receipt printer and install it in Windows, then let Thermal Bridge find it.', action)}</div>`);
+    setHTML('overviewPrinters', `<li>${emptyState('printer', 'No printers yet', 'Detect printers finds the ones Windows knows about.', '<button class="btn btn-primary btn-sm" data-action="openDiscover">' + icon('search') + 'Detect printers</button>')}</li>`);
+    setHTML('printerSummary', '');
+    return;
+  }
+
+  const online = printers.filter((p) => p.state && p.state.status === 'online').length;
+  const totalJobs = printers.reduce((sum, p) => sum + ((p.state && p.state.totalJobsPrinted) || 0), 0);
+  setHTML('printerSummary', `
+    <span class="badge ${online === printers.length ? 'badge-ok' : 'badge-warn'}">${online} of ${printers.length} ready</span>
+    <span class="badge badge-neutral">${totalJobs} printed</span>`);
+
+  setHTML('printerCards', printers.map(printerCard).join(''));
+  if (openId) {
+    const again = document.querySelector(`#printerCards details [data-id="${CSS.escape(openId)}"]`);
+    if (again) again.closest('details').open = true;
+  }
+
+  setHTML('overviewPrinters', printers.slice(0, 6).map((p) => {
+    const st = printerStatus(p);
+    const dot = { ok: 'bg-ok', warn: 'bg-warn', bad: 'bg-bad', info: 'bg-info' }[st.tone] || 'bg-fg-3';
+    const why = st.s !== 'online' && p.state && (p.state.reason || p.state.lastError);
+    return `<li>
+      <button class="flex w-full items-center gap-4 px-5 py-3 text-left transition-colors hover:bg-hover/60" data-nav="printers">
+        <span class="relative flex size-2.5 shrink-0">${st.tone === 'ok' ? `<span class="absolute inline-flex size-full rounded-full ${dot} opacity-60 motion-safe:animate-ping"></span>` : ''}<span class="relative inline-flex size-2.5 rounded-full ${dot}"></span></span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate font-medium">${esc(ROLE_LABELS[p.id] || p.name)}</span>
+          <span class="block truncate text-xs text-fg-3">${esc(why || (p.type === 'network' ? `${p.host}:${p.port || 9100}` : (p.state && p.state.boundPrinterName) || p.printerName || p.name))}</span>
+        </span>
+        <span class="badge ${st.badge}">${esc(st.label)}</span>
+      </button>
+    </li>`;
+  }).join(''));
+}
+
+// ── Detect printers ───────────────────────────────────────────────────────────
+
+// "Detect printers" looks everywhere at once: Windows printers (USB and
+// shared) and devices answering on port 9100 on the local network.
+function openDiscover() {
+  openDialog('discoverDialog');
+  rescanDiscover();
+  scanNetworkForPrinters();
+}
+
+// Roles a discovered printer can be assigned to, from the service, so the
+// dashboard never hardcodes the list.
+let discoverRoles = [];
+
+async function loadRoles() {
+  if (discoverRoles.length) return;
+  try {
+    const d = await api('GET', '/api/printers/roles');
+    discoverRoles = d.roles || [];
+  } catch {
+    discoverRoles = [
+      { id: 'receipt', label: 'Receipt', description: 'Customer bills' },
+      { id: 'kitchen', label: 'Kitchen (KOT)', description: 'Order tickets' }
+    ];
+  }
+}
+
+function loadingRow(text) {
+  return `<div class="flex items-center gap-3 rounded-xl border border-dashed border-line px-4 py-6 text-[13px] text-fg-2">${icon('refresh', 'size-4 motion-safe:animate-spin text-fg-3')}${esc(text)}</div>`;
+}
+
+function roleButtons(dataAttrs, recommended) {
+  return discoverRoles.map((r) => `
+    <button class="btn btn-sm ${r.id === 'receipt' && recommended ? 'btn-primary' : 'btn-secondary'}" title="${esc(r.description)}" data-role="${esc(r.id)}" ${dataAttrs}>${esc(r.label)}</button>`).join('');
+}
+
+async function rescanDiscover() {
+  const list = $('discoverList');
+  const sys = $('discoverSystem');
+  list.innerHTML = loadingRow('Looking for printers in Windows…');
+  sys.innerHTML = '';
+
+  try {
+    await loadRoles();
+    const d = await api('GET', '/api/printers/discover');
+    const printers = d.printers || [];
+    const s = d.system || {};
+    const host = s.host || {};
+
+    // A damaged WMI repository is a Windows fault, not a printer fault. Say so
+    // plainly, note that printing still works, and give the one command that
+    // fixes it; otherwise the raw "Invalid class" warnings read as if
+    // Thermal Bridge is broken.
+    const wmi = host.wmiHealthy === false
+      ? `<div class="callout callout-warn"><span class="text-warn">${icon('alert')}</span><div class="min-w-0">
+          <div class="font-medium">Windows management data (WMI) is damaged on this PC</div>
+          <div class="mt-0.5 text-fg-2">Printers are read straight from the Print Spooler instead, so detection and printing still work. Some detail, such as paper-out reporting, is unavailable until Windows is repaired.</div>
+          <div class="mt-2 text-xs text-fg-3">To repair, run this in an Administrator Command Prompt, then restart the PC: <code class="rounded bg-raised px-1.5 py-0.5 font-mono text-fg">winmgmt /salvagerepository</code></div>
+        </div></div>`
+      : '';
+
+    const facts = [
+      `${icon('server', 'size-3.5')}Print Spooler <strong class="font-medium ${s.spoolerRunning ? 'text-ok' : 'text-bad'}">${s.spoolerRunning ? 'running' : 'stopped'}</strong>`,
+      `${icon('usb', 'size-3.5')}USB printers attached <strong class="font-medium text-fg">${esc(s.attachedUsbDevices ?? 0)}</strong>${s.livePorts && s.livePorts.length ? ` <span class="font-mono">(${s.livePorts.map(esc).join(', ')})</span>` : ''}`,
+      host.osCaption ? `${icon('monitor', 'size-3.5')}${esc(host.osCaption)}` : ''
+    ].filter(Boolean).map((f) => `<span class="inline-flex items-center gap-1.5">${f}</span>`).join('');
+
+    sys.innerHTML = wmi
+      + `<div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-fg-2">${facts}</div>`
+      // The raw warnings are support detail, not headline news.
+      + (s.warnings && s.warnings.length
+        ? `<details class="text-xs text-fg-3"><summary class="cursor-pointer select-none">Technical details</summary>
+            <div class="mt-2 space-y-1 font-mono">${s.warnings.map(esc).join('<br>')}</div></details>`
+        : '');
+
+    // Printers that are plugged in but have no driver: the usual reason a
+    // freshly imaged machine finds nothing.
+    const needsDriver = (d.needsDriver || []).map((dev) => `
+      <div class="callout callout-warn"><span class="text-warn">${icon('usb')}</span><div class="min-w-0">
+        <div class="font-medium">Printer connected but not installed</div>
+        <div class="mt-0.5 text-fg-2">${esc(dev.problem)}</div>
+        <div class="mt-1 text-xs text-fg-3">${esc(dev.suggestion)}</div>
+        <div class="mt-1 font-mono text-xs text-fg-3">${esc(dev.deviceName)}${dev.portName ? ' · ' + esc(dev.portName) : ''}</div>
+      </div></div>`).join('');
+
+    if (printers.length === 0) {
+      list.innerHTML = needsDriver + `<div class="rounded-xl border border-dashed border-line">${emptyState('printer',
+        'No printers found',
+        (d.needsDriver || []).length
+          ? 'Install the driver for the device above, then rescan.'
+          : 'Install the printer in Windows first, then rescan.')}</div>`;
+      return;
+    }
+
+    list.innerHTML = needsDriver + printers.map((p, idx) => {
+      const cfg = p.suggestedConfig || {};
+      const st = PRINTER_STATUS[p.status] || [p.status, 'badge-neutral'];
+      const target = p.type === 'network'
+        ? `${p.connection.host || ''}:${p.connection.port || 9100}`
+        : `${p.connection.portName || '-'} · ${p.connection.driverName || ''}`;
+      return `<div class="rounded-xl border ${p.recommended ? 'border-accent/40 bg-accent/[0.03]' : 'border-line'} p-4">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div class="flex min-w-0 items-start gap-3">
+            <span class="grid size-10 shrink-0 place-items-center rounded-lg ${p.recommended ? 'bg-accent/10 text-accent' : 'bg-raised text-fg-3'}">${icon('printer', 'size-5')}</span>
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-medium">${esc(p.name)}</span>
+                ${p.recommended ? '<span class="badge badge-ok">Receipt printer</span>' : ''}
+                ${p.alreadyConfiguredAs ? `<span class="chip">Already set up as ${esc(p.alreadyConfiguredAs)}</span>` : ''}
+              </div>
+              <div class="mt-0.5 truncate font-mono text-xs text-fg-3">${esc(target)}</div>
+              <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-fg-2">
+                <span class="badge ${st[1]}">${esc(st[0])}</span>
+                ${p.statusReason ? `<span>${esc(p.statusReason)}</span>` : ''}
+              </div>
+              <div class="mt-1 text-xs text-fg-3">${esc(cfg.capabilities ? cfg.capabilities.maxWidth : 48)} characters wide · ${esc(p.thermalScore)}% likely a receipt printer</div>
+            </div>
+          </div>
+        </div>
+        <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
+          <input class="input h-8 max-w-60 text-xs" id="discoverName-${idx}" placeholder="Name, e.g. Front counter" aria-label="Name for ${esc(p.name)}">
+          <span class="ml-1 text-xs text-fg-3">Use as</span>
+          ${roleButtons(`data-action="setupRole" data-windows-name="${esc(p.name)}" data-name-input="discoverName-${idx}"`, p.recommended)}
+        </div>
+      </div>`;
+    }).join('');
+  } catch {
+    list.innerHTML = `<div class="callout callout-bad"><span class="text-bad">${icon('alertCircle')}</span><div>Could not search for printers.</div></div>`;
+  }
+}
+
+/**
+ * Sweep the LAN for printers.
+ *
+ * Devices that answered an ESC/POS status request are marked as confirmed
+ * printers and sorted first. A device that stayed silent is still listed
+ * (plenty of cheap units never answer) but it is labelled honestly rather
+ * than presented as a confirmed printer.
+ */
+async function scanNetworkForPrinters() {
+  const box = $('networkScanResult');
+  const btn = $('btnScanNetwork');
+  btn.disabled = true;
+  box.innerHTML = loadingRow('Scanning the local network… this takes a few seconds.');
+
+  try {
+    const d = await api('GET', '/api/printers/discover-network');
+    const list = d.printers || [];
+    if (list.length === 0) {
+      box.innerHTML = `<div class="rounded-xl border border-dashed border-line px-4 py-5 text-[13px] text-fg-3">${esc(d.message || 'Nothing found.')}</div>`;
+      return;
+    }
+    await loadRoles();
+    box.innerHTML = `<p class="text-xs text-fg-3">${esc(d.message)}</p>` + list.map((p, idx) => `
+      <div class="rounded-xl border border-line p-4">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="flex min-w-0 items-start gap-3">
+            <span class="grid size-10 shrink-0 place-items-center rounded-lg bg-raised text-fg-3">${icon('wifi', 'size-5')}</span>
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="font-mono font-medium">${esc(p.host)}:${esc(p.port)}</span>
+                <span class="badge ${p.respondsToEscPos ? 'badge-ok' : 'badge-warn'}">${p.respondsToEscPos ? 'Printer' : 'Unconfirmed'}</span>
+              </div>
+              <div class="mt-1 max-w-xl text-xs text-fg-3">${esc(p.note)}</div>
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm" data-action="useNetworkPrinter" data-host="${esc(p.host)}" data-port="${esc(p.port)}">Custom setup${icon('chevron', 'size-3.5')}</button>
+        </div>
+        <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4">
+          <input class="input h-8 max-w-60 text-xs" id="netName-${idx}" placeholder="Name, e.g. Kitchen" aria-label="Name for ${esc(p.host)}">
+          <span class="ml-1 text-xs text-fg-3">Use as</span>
+          ${roleButtons(`data-action="setupNetworkRole" data-host="${esc(p.host)}" data-port="${esc(p.port)}" data-name-input="netName-${idx}"`, p.respondsToEscPos)}
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    box.innerHTML = `<div class="callout callout-bad"><span class="text-bad">${icon('alertCircle')}</span><div>Scan failed: ${esc((e && e.message) || 'unknown error')}</div></div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function nameFrom(inputId) {
+  const input = inputId && $(inputId);
+  return input && input.value.trim() ? input.value.trim() : undefined;
+}
+
+/** Save a network printer found by the sweep under a role, with the name typed beside it. */
+async function setupNetworkAsRole(btn) {
+  const { role, host } = btn.dataset;
+  try {
+    btn.disabled = true;
+    const d = await api('POST', '/api/printers/setup', { role, host, port: Number(btn.dataset.port), name: nameFrom(btn.dataset.nameInput), test: true });
+    if (d.success === false || d.error) {
+      toast(d.message || d.error || 'Setup failed', 'error');
+      return;
+    }
+    toast(d.message, d.ready ? 'success' : 'error');
+    loadPrinters();
+  } catch {
+    toast('Could not set up the printer', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Carry a discovered address into the Add printer form, pre-filled. */
+function useNetworkPrinter(btn) {
+  closeDialog('discoverDialog');
+  openAddPrinter();
+  setPrinterType('network');
+  $('pHost').value = btn.dataset.host;
+  $('pPort').value = btn.dataset.port;
+  $('pRole').value = 'kitchen';
+  syncRoleField();
+}
+
+// Assign a Windows printer to a role. The service derives the id, capabilities,
+// paper width and cash drawer defaults, so there is nothing else to fill in.
+async function setupAsRole(btn) {
+  const role = btn.dataset.role;
+  const windowsName = btn.dataset.windowsName;
+  const existing = (window.__configuredPrinters || []).find((p) => p.id === role);
+  if (existing && existing.printerName !== windowsName) {
+    const ok = await confirmDialog({
+      title: `Replace the ${role} printer?`,
+      message: `The ${role} printer is currently “${existing.printerName || existing.host}”.\n\nPoint it at “${windowsName}” instead?`,
+      confirmLabel: 'Replace'
+    });
+    if (!ok) return;
+  }
+
+  try {
+    btn.disabled = true;
+    const d = await api('POST', '/api/printers/setup', { role, windowsName, name: nameFrom(btn.dataset.nameInput), test: true });
+    if (d.success === false || d.error) {
+      toast(d.message || d.error || 'Setup failed', 'error');
+      return;
+    }
+    // The service reports honestly when a printer saved but is not usable.
+    toast(d.message, d.ready ? 'success' : 'error');
+    await rescanDiscover();
+    loadPrinters();
+  } catch {
+    toast('Could not set up the printer', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function autoSetup() {
+  try {
+    const d = await api('POST', '/api/printers/auto-setup', { test: true });
+    toast(d.message || 'Setup complete', d.success ? 'success' : 'error');
+    await rescanDiscover();
+    loadPrinters();
+  } catch {
+    toast('Automatic setup failed', 'error');
+  }
+}
+
+// ── Diagnose and repair ───────────────────────────────────────────────────────
+
+async function diagnosePrinter(id) {
+  const body = $('diagnoseBody');
+  const printer = (window.__configuredPrinters || []).find((p) => p.id === id);
+  $('diagnoseTitle').textContent = printer ? `${ROLE_LABELS[id] || printer.name}: details` : `Details: ${id}`;
+  body.innerHTML = loadingRow('Asking Windows about this printer…');
+  openDialog('diagnoseDialog');
+
+  const repairBtn = $('diagnoseRepairBtn');
+  repairBtn.onclick = () => repairPrinter(id, true);
+
+  try {
+    const d = await api('GET', `/api/printers/${encodeURIComponent(id)}/diagnose`);
+    const v = d.verdict || {};
+    const sig = v.signals || {};
+    const plan = d.plan || { actions: [] };
+    const st = PRINTER_STATUS[v.status] || [v.status || 'Unknown', 'badge-neutral'];
+    const yn = (b) => b === null || b === undefined ? '<span class="text-fg-3">n/a</span>' : (b ? 'Yes' : 'No');
+    const row = (k, val) => `<div class="grid grid-cols-[minmax(0,200px)_1fr] gap-4 px-4 py-2.5"><dt class="text-fg-3">${k}</dt><dd class="min-w-0 [overflow-wrap:anywhere]">${val}</dd></div>`;
+
+    body.innerHTML = `
+      <div class="mb-5 flex flex-wrap items-center gap-3">
+        <span class="badge ${st[1]}">${esc(st[0])}</span>
+        <span class="text-fg-2">${esc(v.reason || '')}</span>
+      </div>
+      <dl class="divide-y divide-line rounded-xl border border-line text-[13px]">
+        ${row('Configured name', esc(d.configuredName || '-'))}
+        ${row('Using Windows queue', esc(d.boundName || '-') + (d.found ? '' : ' <span class="badge badge-bad ml-1">not found</span>'))}
+        ${row('Windows port', `<span class="font-mono">${esc(d.windows ? d.windows.portName : '-')}</span>`)}
+        ${row('Driver', esc(d.windows ? d.windows.driverName : '-'))}
+        ${row('“Use Printer Offline” set', yn(sig.workOffline))}
+        ${row('Device plugged in', yn(sig.devicePresent))}
+        ${row('Port has a live device', yn(sig.portLive))}
+        ${row('Moved to another USB port', yn(sig.portMigrated) + (sig.suggestedPort ? ` → <span class="font-mono">${esc(sig.suggestedPort)}</span>` : ''))}
+        ${row('Reported faults', sig.hardErrorFlags && sig.hardErrorFlags.length ? esc(sig.hardErrorFlags.join(', ')) : 'None')}
+        ${row('Print Spooler', d.spoolerRunning ? '<span class="text-ok">Running</span>' : '<span class="text-bad">Stopped</span>')}
+        ${row('USB printers attached', esc(d.attachedDevices ?? 0) + (d.livePorts && d.livePorts.length ? ` <span class="font-mono text-fg-3">(${d.livePorts.map(esc).join(', ')})</span>` : ''))}
+      </dl>
+      <div class="mt-5">
+        <div class="section-label mb-2">Available repairs</div>
+        ${plan.actions.length
+          ? `<ul class="space-y-1.5 text-[13px]">${plan.actions.map((a) => `<li class="flex gap-2">${icon('wrench', 'mt-0.5 size-3.5 shrink-0 text-accent')}<span>${esc(a.why)}</span></li>`).join('')}</ul>`
+          : `<p class="text-[13px] text-fg-3">${esc(plan.manualHint || 'Nothing needs repairing.')}</p>`}
+      </div>`;
+    repairBtn.disabled = plan.actions.length === 0;
+  } catch {
+    body.innerHTML = `<div class="callout callout-bad"><span class="text-bad">${icon('alertCircle')}</span><div>Could not run diagnostics.</div></div>`;
+  }
+}
+
+async function repairPrinter(id, fromDialog) {
+  try {
+    const d = await api('POST', `/api/printers/${encodeURIComponent(id)}/repair`, {});
+    toast(d.message || 'Repair finished', d.success ? 'success' : 'error');
+    loadPrinters();
+    if (fromDialog) setTimeout(() => diagnosePrinter(id), 600);
+  } catch {
+    toast('Repair failed', 'error');
+  }
+}
+
+async function testPrinter(id) {
+  try {
+    await api('POST', `/api/printers/${encodeURIComponent(id)}/test`, {});
+    toast('Test print sent to ' + (ROLE_LABELS[id] || id).toLowerCase());
+    setTimeout(loadJobs, 1500);
+  } catch {
+    toast('Test print failed', 'error');
+  }
+}
+
+async function reconnectPrinter(id) {
+  try {
+    await api('POST', `/api/printers/${encodeURIComponent(id)}/reconnect`, {});
+    toast('Reconnecting ' + id + '…', 'info');
+    setTimeout(loadPrinters, 2000);
+  } catch {
+    toast('Reconnect failed', 'error');
+  }
+}
+
+async function deletePrinter(id) {
+  const ok = await confirmDialog({
+    title: `Remove the “${id}” printer?`,
+    message: 'Its settings are deleted. Jobs the POS sends to this printer ID will fail until a printer is set up for it again.',
+    confirmLabel: 'Remove printer',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const d = await api('DELETE', `/api/config/printers/${encodeURIComponent(id)}`);
+    if (d.success === false) {
+      toast(d.message || d.error || 'Could not remove the printer', 'error');
+      return;
+    }
+    toast(d.message || 'Printer removed');
+    loadPrinters();
+    loadHealth();
+  } catch (e) {
+    toast('Could not remove the printer: ' + (e.message || ''), 'error');
+  }
+}
+
+async function openDrawer(id) {
+  try {
+    const d = await api('POST', `/api/printers/${encodeURIComponent(id)}/cash-drawer`, {});
+    toast(d.message || (d.success ? 'Drawer opened' : 'Drawer did not open'), d.success ? 'success' : 'error');
+  } catch {
+    toast('Could not open the cash drawer', 'error');
+  }
+}
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+let configData = {};
+
+async function loadConfig() {
+  try {
+    configData = await api('GET', '/api/config');
+    $('cfgHost').value = configData.server.host || '';
+    $('cfgPort').value = configData.server.port || '';
+
+    // The service moves to the next free port when the configured one is
+    // busy. Saying so removes the guesswork when a client cannot reach it.
+    const active = configData.server.activePort;
+    const note = $('activePortNote');
+    if (active && active !== configData.server.port) {
+      note.className = 'hint text-warn';
+      note.textContent = `Port ${configData.server.port} was busy, so Thermal Bridge is listening on ${active}. Changes take effect after a restart.`;
+    } else {
+      note.className = 'hint';
+      note.textContent = `Listening on port ${active || configData.server.port}. Changes take effect after a restart.`;
+    }
+
+    $('cfgOrigins').value = (configData.security.allowedOrigins || []).join(', ');
+    $('cfgRateLimit').value = configData.security.rateLimitPerMinute || '';
+    $('cfgApiKey').value = configData.security.apiKey || '';
+  } catch { /* the banner already says the service is unreachable */ }
+}
+
+async function saveServerConfig() {
+  try {
+    const d = await api('PUT', '/api/config/server', {
+      host: $('cfgHost').value,
+      port: parseInt($('cfgPort').value) || 9100
+    });
+    if (d.success) toast(d.message || 'Server settings saved');
+    else toast(d.message || d.error || 'Could not save', 'error');
+  } catch {
+    toast('Could not save', 'error');
+  }
+}
+
+async function saveSecurityConfig() {
+  try {
+    const origins = $('cfgOrigins').value.split(',').map((s) => s.trim()).filter(Boolean);
+    const body = {
+      allowedOrigins: origins,
+      rateLimitPerMinute: parseInt($('cfgRateLimit').value) || 120
+    };
+    const key = $('cfgApiKey').value.trim();
+    body.enableApiKey = !!key;
+    if (key) body.apiKey = key;
+    const d = await api('PUT', '/api/config/security', body);
+    if (d.success) {
+      toast(d.message || 'Security settings saved');
+      if (d.security && d.security.apiKey) __API_KEY = d.security.apiKey;
+      loadOrigins();
+    } else {
+      toast(d.message || d.error || 'Could not save', 'error');
+    }
+  } catch {
+    toast('Could not save', 'error');
+  }
+}
+
+// ── Printer form ──────────────────────────────────────────────────────────────
+
+async function loadSystemPrinters() {
+  try {
+    // Discovery rather than the bare list: it knows which queues are real
+    // receipt printers and what state each is in, so swapping a printer is a
+    // meaningful choice rather than a list of names.
+    const d = await api('GET', '/api/printers/discover?all=1');
+    const found = d.printers || [];
+    const recommended = found.filter((p) => p.recommended);
+    const others = found.filter((p) => !p.recommended);
+    const optionFor = (p) => {
+      const st = p.status === 'online' ? 'Ready' : p.status === 'offline' ? 'Not connected' : p.status;
+      return `<option value="${esc(p.name)}">${esc(p.name)} (${esc(st)})</option>`;
+    };
+    $('pPrinterName').innerHTML =
+      '<option value="">Choose a printer…</option>'
+      + (recommended.length ? `<optgroup label="Receipt printers">${recommended.map(optionFor).join('')}</optgroup>` : '')
+      + (others.length ? `<optgroup label="Other printers">${others.map(optionFor).join('')}</optgroup>` : '');
+  } catch { /* the select keeps its placeholder */ }
+}
+
+function setPrinterType(type) {
+  $('pType').value = type;
+  document.querySelectorAll('#pTypeSeg [data-type]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.type === type)));
+  $('usbFields').hidden = type !== 'usb';
+  $('networkFields').hidden = type !== 'network';
+}
+
+/**
+ * The ID the POS addresses is chosen from a list, not typed.
+ *
+ * A typo here is silent and total: the POS sends to "kitchen", the printer is
+ * saved as "kitchn", and every ticket fails with PRINTER_NOT_FOUND. Nothing in
+ * the UI would show the mismatch, because both halves look correct on their own
+ * screen. "Something else" stays for sites that need a fifth printer, and only
+ * that path can still produce a typo.
+ */
+function syncRoleField() {
+  const role = $('pRole').value;
+  const idInput = $('pId');
+  const custom = role === '__custom';
+  idInput.hidden = !custom;
+  if (!custom) idInput.value = role;
+  $('pIdHint').textContent = custom
+    ? 'Lowercase letters, numbers, hyphens or underscores. The POS must send jobs to exactly this ID.'
+    : 'This is the ID the POS sends jobs to. Picking a role sets it for you.';
+
+  // Only prefill the name while it is untouched, so "Front counter" typed by
+  // the operator is not overwritten by changing the role.
+  const nameInput = $('pName');
+  if (!custom && !nameInput.dataset.touched) {
+    const labels = { receipt: 'Receipt Printer', kitchen: 'Kitchen Printer', bar: 'Bar Printer', label: 'Label Printer' };
+    nameInput.value = labels[role] || '';
+  }
+}
+
+/**
+ * Probe the entered address before anything is saved.
+ *
+ * Without this, checking a LAN address means saving a printer, watching it
+ * fail, editing it and repeating, and every round trip leaves a
+ * half-configured printer behind in config.json.
+ */
+async function testConnection() {
+  const box = $('testConnResult');
+  const btn = $('btnTestConn');
+  const host = $('pHost').value.trim();
+  const port = parseInt($('pPort').value) || 9100;
+
+  const show = (tone, head, fix) => {
+    const ic = { ok: ['checkCircle', 'text-ok'], bad: ['alertCircle', 'text-bad'], info: ['refresh', 'text-fg-3 motion-safe:animate-spin'] }[tone];
+    box.className = `callout callout-${tone}`;
+    box.innerHTML = `<span class="${ic[1]}">${icon(ic[0])}</span><div class="min-w-0"><div class="font-medium">${esc(head)}</div>${fix ? `<div class="mt-0.5 text-fg-2">${esc(fix)}</div>` : ''}</div>`;
+    box.hidden = false;
+  };
+
+  show('info', `Connecting to ${host || '…'}:${port}…`, '');
+  btn.disabled = true;
+  try {
+    // A rejected address comes back as a 400 carrying the same {reason, fix}
+    // shape as a failed connection, so both render the same way.
+    const d = await api('POST', '/api/printers/test-connection', { host, port });
+    show(d.ok ? 'ok' : 'bad', d.reason || 'The test did not return a result', d.fix);
+  } catch (e) {
+    show('bad', 'Could not reach Thermal Bridge to run the test', (e && e.message) || '');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function applyWidthPreset() {
+  const preset = $('pWidthPreset').value;
+  $('widthCustomRow').hidden = preset !== 'custom';
+  if (preset !== 'custom') $('pWidth').value = preset;
+}
+
+// Map a saved character width back onto the friendly preset list.
+function setWidthFields(width) {
+  const w = String(width || 48);
+  const known = ['48', '32', '42'].includes(w);
+  $('pWidthPreset').value = known ? w : 'custom';
+  $('pWidth').value = w;
+  $('widthCustomRow').hidden = known;
+}
+
+function applyDrawerToForm(cd) {
+  $('cdEnabled').checked = !!(cd && cd.enabled);
+  $('cdOpenOnPrint').checked = !!(cd && cd.openOnPrint);
+  $('cdPin').value = String((cd && cd.pin) || 2);
+  $('cdOnTime').value = String((cd && cd.onTimeMs) || 50);
+}
+
+function readDrawerFromForm() {
+  return {
+    enabled: $('cdEnabled').checked,
+    openOnPrint: $('cdOpenOnPrint').checked,
+    pin: parseInt($('cdPin').value, 10) === 5 ? 5 : 2,
+    onTimeMs: Math.max(10, Math.min(510, parseInt($('cdOnTime').value, 10) || 50)),
+    offTimeMs: 200
+  };
+}
+
+// Fire a pulse with the values in the form, so drawer wiring can be proven
+// before the settings are saved.
+async function testDrawerPulse() {
+  const id = $('editPrinterId').value || $('pId').value.trim();
+  if (!id || !$('editPrinterId').value) {
+    toast('Save the printer first, then test the drawer', 'warn');
+    return;
+  }
+  const cd = readDrawerFromForm();
+  try {
+    const d = await api('POST', `/api/printers/${encodeURIComponent(id)}/cash-drawer`, { pin: cd.pin, onTimeMs: cd.onTimeMs, offTimeMs: cd.offTimeMs });
+    toast(d.message || (d.success ? 'Drawer pulsed' : 'Drawer did not respond'), d.success ? 'success' : 'error');
+  } catch {
+    toast('Could not reach the printer to test the drawer', 'error');
+  }
+}
+
+function setCapabilities(caps) {
+  const c = caps || {};
+  $('capBarcode').checked = c.supportsBarcode ?? true;
+  $('capQR').checked = c.supportsQRCode ?? false;
+  $('capCut').checked = c.supportsCut ?? true;
+  $('capCashDrawer').checked = c.supportsCashDrawer ?? true;
+  $('capBold').checked = c.supportsBold ?? true;
+  $('capUnderline').checked = c.supportsUnderline ?? true;
+}
+
+function openAddPrinter() {
+  $('modalTitle').textContent = 'Add printer';
+  $('modalSubtitle').textContent = 'Detect printers is quicker for most setups.';
+  $('editPrinterId').value = '';
+  $('pId').value = '';
+  $('pId').disabled = false;
+  $('pRole').disabled = false;
+  $('pRole').value = 'receipt';
+  $('pName').value = '';
+  delete $('pName').dataset.touched;
+  // After pName is cleared, so the role's suggested name survives.
+  syncRoleField();
+  setPrinterType('usb');
+  $('pPrinterName').value = '';
+  $('pHost').value = '';
+  $('pPort').value = '9100';
+  $('testConnResult').hidden = true;
+  setWidthFields(48);
+  $('pDefault').checked = false;
+  setCapabilities(null);
+  applyDrawerToForm(null);
+  $('advancedFields').open = false;
+  loadSystemPrinters();
+  openDialog('printerDialog');
+}
+
+async function editPrinter(id) {
+  const cfg = await api('GET', '/api/config');
+  const p = (cfg.printers || []).find((x) => x.id === id);
+  if (!p) return;
+
+  const roleName = { receipt: 'Receipt', kitchen: 'Kitchen (KOT)', bar: 'Bar', label: 'Label' }[p.id];
+  $('modalTitle').textContent = roleName ? `${roleName} printer` : p.name;
+  $('modalSubtitle').textContent = 'Changes apply as soon as you save.';
+  $('editPrinterId').value = id;
+  $('pId').value = p.id;
+  $('pId').disabled = true;
+  // The ID is the POS's address for this printer and is never editable here;
+  // changing it would silently orphan every job the POS sends.
+  const knownRole = ['receipt', 'kitchen', 'bar', 'label'].includes(p.id);
+  $('pRole').value = knownRole ? p.id : '__custom';
+  $('pRole').disabled = true;
+  $('pId').hidden = knownRole;
+  $('pIdHint').textContent = `The POS sends jobs to “${p.id}”. This cannot be changed after the printer is created.`;
+  $('pName').dataset.touched = '1';
+  $('pName').value = p.name;
+  setPrinterType(p.type);
+  $('pPrinterName').value = p.printerName || '';
+  $('pHost').value = p.host || '';
+  $('pPort').value = p.port || 9100;
+  $('testConnResult').hidden = true;
+  setWidthFields(p.capabilities && p.capabilities.maxWidth);
+  $('pDefault').checked = !!p.isDefault;
+  setCapabilities(p.capabilities);
+  applyDrawerToForm(p.cashDrawer);
+  $('advancedFields').open = false;
+  loadSystemPrinters().then(() => {
+    const sel = $('pPrinterName');
+    if (p.printerName && ![...sel.options].some((o) => o.value === p.printerName)) {
+      sel.insertAdjacentHTML('beforeend', `<option value="${esc(p.printerName)}">${esc(p.printerName)} (not found)</option>`);
+    }
+    sel.value = p.printerName || '';
+  });
+  openDialog('printerDialog');
+}
+
+async function savePrinter() {
+  const editId = $('editPrinterId').value;
+  const type = $('pType').value;
+
+  const body = {
+    id: $('pId').value.trim(),
+    name: $('pName').value.trim(),
+    type,
+    enabled: true,
+    isDefault: $('pDefault').checked,
+    capabilities: {
+      maxWidth: parseInt($('pWidth').value) || 48,
+      supportsBarcode: $('capBarcode').checked,
+      supportsQRCode: $('capQR').checked,
+      supportsCut: $('capCut').checked,
+      supportsPartialCut: $('capCut').checked,
+      supportsCashDrawer: $('capCashDrawer').checked,
+      supportsBold: $('capBold').checked,
+      supportsUnderline: $('capUnderline').checked,
+      supportsImage: false,
+      supportsDensity: true,
+      codepage: 0
+    },
+    cashDrawer: readDrawerFromForm()
+  };
+
+  if (type === 'usb') {
+    body.printerName = $('pPrinterName').value;
+  } else {
+    body.host = $('pHost').value.trim();
+    body.port = parseInt($('pPort').value) || 9100;
+  }
+
+  if (!body.id || !body.name) {
+    toast('A printer ID and a name are required', 'error');
+    return;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(body.id)) {
+    toast('The printer ID can only contain letters, numbers, hyphens and underscores', 'error');
+    return;
+  }
+  if (type === 'usb' && !body.printerName) {
+    toast('Choose which Windows printer to use', 'error');
+    return;
+  }
+
+  // Catch address mistakes here rather than letting them come back as a
+  // rejected save. Same rules as validateNetworkTarget in the service; this
+  // copy only exists to answer faster.
+  if (type === 'network') {
+    if (!body.host) {
+      toast('A network printer needs an IP address. It is on the printer\'s self-test page', 'error');
+      return;
+    }
+    if (/^https?:\/\//i.test(body.host)) {
+      toast('Enter just the IP address, not a URL', 'error');
+      return;
+    }
+    const quad = body.host.split('.');
+    if (/^[0-9.]+$/.test(body.host) && (quad.length !== 4 || quad.some((n) => n === '' || Number(n) > 255))) {
+      toast(`“${body.host}” is not a valid IP address. It needs four numbers from 0 to 255, like 192.168.1.100`, 'error');
+      return;
+    }
+    if (body.port < 1024 || body.port > 65535) {
+      toast('The port must be between 1024 and 65535. Raw ESC/POS printing is almost always 9100', 'error');
+      return;
+    }
+    if (body.port !== 9100) {
+      // Allowed, but worth saying: a wrong port is the second most common LAN
+      // printer mistake after a wrong IP.
+      toast(`Saving with port ${body.port}. Most network receipt printers use 9100.`, 'warn');
+    }
+  }
+
+  try {
+    const d = editId
+      ? await api('PUT', `/api/config/printers/${encodeURIComponent(editId)}`, body)
+      : await api('POST', '/api/config/printers', body);
+    if (d.success === false) {
+      toast(d.message || d.error || (editId ? 'Update failed' : 'Could not add the printer'), 'error');
+      return;
+    }
+    toast(d.message || (editId ? 'Printer updated' : 'Printer added'));
+    closeDialog('printerDialog');
+    loadPrinters();
+    loadConfig();
+    loadHealth();
+  } catch (e) {
+    toast('Could not save the printer: ' + (e.message || ''), 'error');
+  }
+}
+
+// ── Backup ────────────────────────────────────────────────────────────────────
+
+async function loadBackup() {
+  if (!state.showBackup) return;
+  try {
+    const s = await api('GET', '/api/backup/status');
+    const last = s.lastRun;
+    const result = s.running ? 'Running…' : (last ? last.status : 'No runs yet');
+    const tone = /^success/.test(result) ? 'ok' : result === 'error' ? 'bad' : /^Run/.test(result) ? 'info' : '';
+    $('backupStats').innerHTML = [
+      statTile('POS reachable at', `<span class="text-sm">${esc(s.posLanUrl || s.posBaseUrl || '-')}</span>`, '', 'globe'),
+      statTile('POS connection', s.lastPollOk ? 'OK' : 'Down', '', 'plug', s.lastPollOk ? 'ok' : 'bad'),
+      statTile('Last result', `<span class="text-base">${esc(result)}</span>`, '', 'clock', tone),
+      statTile('Last backup size', last ? esc(fmtBytes(last.totalBytes)) : '-', '', 'database')
+    ].join('');
+    if (last && last.message) $('backupHint').textContent = last.message;
+  } catch {
+    $('backupStats').innerHTML = '<p class="col-span-full text-fg-3">Backup is unavailable.</p>';
+  }
+
+  try {
+    const d = await api('GET', '/api/backup/list');
+    const paths = d.paths || [];
+    if (!paths.length) {
+      $('backupList').innerHTML = emptyState('database', 'No backup folders yet', 'Add them in the POS under Server Management.');
+      return;
+    }
+    $('backupList').innerHTML = paths.map((p) => `
+      <div class="mb-6 last:mb-0">
+        <div class="mb-2 flex flex-wrap items-baseline gap-2"><span class="font-mono text-[13px] font-medium">${esc(p.path)}</span><span class="text-xs text-fg-3">${p.files.length} file${p.files.length === 1 ? '' : 's'}</span></div>
+        ${p.files.length ? `<div class="overflow-hidden rounded-xl border border-line"><table class="tbl"><thead><tr><th>File</th><th>Size</th><th>Created</th><th></th></tr></thead><tbody>${
+          p.files.map((f) => `<tr>
+            <td class="font-mono text-xs">${esc(f.name)}</td>
+            <td class="tabular-nums">${fmtBytes(f.sizeBytes)}</td>
+            <td class="text-fg-2">${esc(new Date(f.mtime).toLocaleString())}</td>
+            <td class="text-right"><button class="btn btn-danger btn-sm" data-restore-path="${esc(p.path)}" data-restore-file="${esc(f.name)}">Restore</button></td>
+          </tr>`).join('')
+        }</tbody></table></div>` : '<p class="text-[13px] text-fg-3">No backups in this folder yet.</p>'}
+      </div>`).join('');
+  } catch {
+    $('backupList').innerHTML = '<p class="text-fg-3">Could not list backups.</p>';
+  }
+}
+
+async function runBackupNow() {
+  try {
+    const d = await api('POST', '/api/backup/run');
+    toast(d.message || 'Backup started');
+    setTimeout(loadBackup, 3000);
+  } catch (e) {
+    toast('Could not start the backup: ' + (e.message || ''), 'error');
+  }
+}
+
+async function restoreBackup(dir, file) {
+  const ok = await confirmDialog({
+    title: 'Restore this backup?',
+    message: `${file}\n\nThis replaces the current POS data and cannot be undone.`,
+    confirmLabel: 'Restore',
+    danger: true
+  });
+  if (!ok) return;
+  toast('Restoring… this may take a moment', 'info');
+  try {
+    const d = await api('POST', '/api/backup/restore', { path: dir, file });
+    if (d.success) toast(d.message || 'Database restored');
+    else toast(d.message || d.error || 'Restore failed', 'error');
+  } catch (e) {
+    toast('Restore failed: ' + (e.message || ''), 'error');
+  }
+}
+
+// ── Events ────────────────────────────────────────────────────────────────────
+
+const ACTIONS = {
+  openAddPrinter, savePrinter, loadJobs, toggleQueue, clearFailedJobs,
+  saveServerConfig, saveSecurityConfig, runBackupNow,
+  refreshPrinters: () => { loadPrinters(); toast('Printers refreshed', 'info'); },
+  openDiscover, rescanDiscover, autoSetup, scanNetwork: scanNetworkForPrinters,
+  printTestPage, checkForUpdates, downloadUpdate, installUpdate,
+  importLegacy, dismissLegacy, cycleTheme, testConnection, testDrawerPulse,
+  copyUrl: (el) => copyUrl(el),
+  setupRole: (el) => setupAsRole(el),
+  setupNetworkRole: (el) => setupNetworkAsRole(el),
+  useNetworkPrinter: (el) => useNetworkPrinter(el),
+  testPrinter: (el) => testPrinter(el.dataset.id),
+  editPrinter: (el) => editPrinter(el.dataset.id),
+  diagnosePrinter: (el) => diagnosePrinter(el.dataset.id),
+  repairPrinter: (el) => repairPrinter(el.dataset.id),
+  openDrawer: (el) => openDrawer(el.dataset.id),
+  reconnectPrinter: (el) => reconnectPrinter(el.dataset.id),
+  deletePrinter: (el) => deletePrinter(el.dataset.id),
+  retryJob: (el) => retryJob(el.dataset.id)
+};
+
+document.addEventListener('click', (e) => {
+  // Close any open "more" menu that was not clicked.
+  document.querySelectorAll('details[data-menu][open]').forEach((m) => {
+    if (!m.contains(e.target)) m.open = false;
+  });
+
+  const nav = e.target.closest('[data-nav]');
+  if (nav) {
+    window.location.hash = '#' + nav.dataset.nav;
+    return;
+  }
+  const close = e.target.closest('[data-close]');
+  if (close) {
+    close.closest('dialog').close();
+    return;
+  }
+  const restore = e.target.closest('[data-restore-file]');
+  if (restore) {
+    restoreBackup(restore.dataset.restorePath, restore.dataset.restoreFile);
+    return;
+  }
+  const origin = e.target.closest('[data-origin][data-decision]');
+  if (origin) {
+    decideOrigin(origin.dataset.origin, origin.dataset.decision);
+    return;
+  }
+  const filter = e.target.closest('#jobFilters [data-filter]');
+  if (filter) {
+    setJobFilter(filter);
+    return;
+  }
+  const tab = e.target.closest('#settingsTabs [data-tab]');
+  if (tab) {
+    showSettingsTab(tab.dataset.tab);
+    return;
+  }
+  const theme = e.target.closest('[data-theme-choice]');
+  if (theme) {
+    applyTheme(theme.dataset.themeChoice);
+    return;
+  }
+  const type = e.target.closest('#pTypeSeg [data-type]');
+  if (type) {
+    setPrinterType(type.dataset.type);
+    return;
+  }
+  const action = e.target.closest('[data-action]');
+  if (action && ACTIONS[action.dataset.action]) {
+    const menu = action.closest('details[data-menu]');
+    if (menu) menu.open = false;
+    ACTIONS[action.dataset.action](action);
+  }
+});
+
+// A click on the dimmed backdrop closes a dialog (the dialog element itself
+// only receives clicks outside its content box).
+document.querySelectorAll('dialog').forEach((d) => {
+  d.addEventListener('click', (e) => {
+    if (e.target === d && d.id !== 'confirmDialog') d.close();
+  });
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('[data-logo]').forEach((svg) => { svg.innerHTML = LOGO; });
+  hydrateIcons();
+  applyTheme(savedTheme());
+
+  $('pRole').addEventListener('change', syncRoleField);
+  $('pWidthPreset').addEventListener('change', applyWidthPreset);
+  $('printerForm').addEventListener('submit', (e) => { e.preventDefault(); savePrinter(); });
+  $('addOriginForm').addEventListener('submit', addOrigin);
+  $('startupToggle').addEventListener('change', (e) => setStartup(e.target.checked));
+  // A changed address invalidates the previous result; leaving it on screen
+  // would show a green tick for an address nobody tested.
+  ['pHost', 'pPort'].forEach((id) => $(id).addEventListener('input', () => { $('testConnResult').hidden = true; }));
+  // Once the operator edits the name themselves, stop suggesting one.
+  $('pName').addEventListener('input', (e) => { e.target.dataset.touched = '1'; });
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+
+(async () => {
+  await new Promise((r) => (document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', r) : r()));
+  await discoverPort();
+  await fetchApiKey();
+  handleRoute();
+  loadHealth();
+  loadPrinters();
+  // Subscribe after the key is known, so the stream authenticates first time.
+  startLiveUpdates();
+  loadConfig();
+  loadQueueStats();
+  loadJobs();
+  loadAppInfo();
+  loadOrigins();
+})();
+
+// ── Live sync ─────────────────────────────────────────────────────────────────
+// The service detects a plug or unplug within about a second. Polling would
+// throw that away, so the page subscribes to a push stream and only falls back
+// to polling if the stream cannot be established.
+let __events = null;
+let __liveConnected = false;
+
+function setLiveIndicator(on) {
+  __liveConnected = on;
+  $('liveDot').className = `relative inline-flex size-2 rounded-full ${on ? 'bg-ok' : 'bg-fg-3'}`;
+  $('livePing').className = `absolute inline-flex size-full rounded-full ${on ? 'bg-ok/60 motion-safe:animate-ping' : 'bg-fg-3'}`;
+  $('liveText').textContent = on ? 'Live' : 'Reconnecting…';
+  $('liveLabel').title = on ? 'Updates arrive instantly' : 'Reconnecting… updates may lag';
+}
+
+function startLiveUpdates() {
+  if (!window.EventSource) return;
+  try {
+    if (__events) __events.close();
+    // EventSource cannot send headers, so the key travels as a query param.
+    const url = API + '/api/events' + (__API_KEY ? '?key=' + encodeURIComponent(__API_KEY) : '');
+    __events = new EventSource(url);
+    __events.addEventListener('printers', (e) => {
+      try {
+        const payload = JSON.parse(e.data);
+        setLiveIndicator(true);
+        renderPrinters(payload.printers || []);
+        loadHealth();
+      } catch { /* a malformed event; the poll covers it */ }
+    });
+    __events.onopen = () => setLiveIndicator(true);
+    // EventSource reconnects on its own; the poll below covers the gap.
+    __events.onerror = () => setLiveIndicator(false);
+  } catch {
+    setLiveIndicator(false);
+  }
+}
+
+// Safety net. Fast while the stream is down, relaxed while it is up: the
+// stream already delivers printer changes, so this refreshes the rest.
+setInterval(() => {
+  loadHealth();
+  loadQueueStats();
+  loadJobs();
+  if (!__liveConnected) loadPrinters();
+  if (state.page === 'backup') loadBackup();
+  if (state.page === 'settings' && state.settingsTab === 'about') loadSystemInfo();
+}, 10000);
+
+setInterval(() => {
+  if (!__liveConnected) loadPrinters();
+}, 2500);
+
+// A site asking to print should be answered while its owner is still looking.
+setInterval(loadOrigins, 4000);
+</script>
+</body>
+</html>

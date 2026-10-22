@@ -29,7 +29,7 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 REM -- Preparing environment ---------------------------------------------
 echo   Preparing Environment
@@ -76,7 +76,7 @@ echo   Installing Windows Service
 echo   ----------------------------------------------------------------
 echo.
 
-PowerShell -ExecutionPolicy Bypass -File "scripts\install.ps1"
+PowerShell -ExecutionPolicy Bypass -File "legacy\install.ps1"
 set INSTALL_RESULT=%errorLevel%
 
 if %INSTALL_RESULT% neq 0 (

@@ -1,33 +1,52 @@
 # Troubleshooting
 
-Audience: on-site IT installer. Symptom-first. Each entry states how to confirm the cause before applying a fix.
+Audience: whoever supports the till. Symptom-first. Each entry states how to confirm the cause before applying a fix.
 
-See [install.md](install.md) for deployment, [daily-use.md](daily-use.md) for normal operation, [web-integration.md](web-integration.md) for API integration issues.
+See [install.md](install.md) for deployment, [daily-use.md](daily-use.md) for normal operation, [web-integration.md](web-integration.md) for API integration issues. For the old XP Thermal Print Service, see [legacy/README.md](../legacy/README.md).
 
 ---
 
 ## Start here: identify the layer
 
-Run this before anything else. It answers "is the service running, on which port, and does it think it is healthy" in one pass.
-
 ```powershell
-Get-Service -Name xpthermalprintservice.exe
-type "$env:ProgramData\XPThermalService\active_port.txt"
-netstat -ano | findstr ":910"
-9100..9109 | ForEach-Object {
+Get-Process ThermalBridge, ThermalBridgeTray -ErrorAction SilentlyContinue
+type "$env:LOCALAPPDATA\ThermalBridge\active_port.txt"
+9100..9110 | ForEach-Object {
     try {
         $r = Invoke-RestMethod "http://127.0.0.1:$_/health" -TimeoutSec 1
-        "{0}  {1}  {2}" -f $_, $r.service, $r.status
+        "{0}  {1}  {2}  {3}  {4}" -f $_, $r.service, $r.name, $r.mode, $r.status
     } catch {}
 }
 ```
 
 | Result | Layer at fault | Go to |
 |---|---|---|
-| Service not found or stopped | Service | [Service will not start](#service-will-not-start) |
-| Service running, nothing answers 9100-9109 | Bind | [Nothing is listening](#nothing-is-listening) |
+| No `ThermalBridge` process | App not running | [Thermal Bridge is not running](#thermal-bridge-is-not-running) |
+| Running, nothing answers 9100–9110 | Print server | [Nothing is listening](#nothing-is-listening) |
+| Answers without a `name` | The old XP Thermal Print Service | [Tray says the installed service is printing](#tray-says-the-installed-service-is-printing) |
 | A port answers, but not with `xp-thermal-service` | Port conflict | [Wrong application on the port](#wrong-application-on-the-port) |
-| Answers with `xp-thermal-service` | Service is up | [Dashboard 404](#dashboard-shows-404-or-page-not-found) or [Printers](#printers) |
+| Answers with `Thermal Bridge` | Up | [Printers](#printers) or [A website cannot print](#a-website-cannot-print) |
+
+For a service install, use `Get-Service ThermalBridge` and `%ProgramData%\ThermalBridge` instead.
+
+---
+
+## Thermal Bridge is not running
+
+1. Start it from the Start Menu (**Thermal Bridge**). If it was already running, that just opens the dashboard.
+2. If it should have started with Windows: dashboard → Settings → General → *Start with Windows*. Or check:
+   ```powershell
+   Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name ThermalBridge
+   ```
+3. If it starts and disappears, read `%LOCALAPPDATA%\ThermalBridge\logs\supervisor.log` and `console.log`.
+
+---
+
+## Tray says the installed service is printing
+
+Thermal Bridge found the old XP Thermal Print Service (or a Thermal Bridge Windows service) already answering, and stood aside so the two do not fight over printers. Printing works through that service.
+
+To switch to Thermal Bridge: import your printers from the dashboard notice, then remove the old service (`legacy\uninstall.bat` as Administrator, or `sc stop xpthermalprintservice.exe` and `sc delete xpthermalprintservice.exe`). Thermal Bridge takes over within about three minutes.
 
 ---
 
@@ -37,105 +56,50 @@ netstat -ano | findstr ":910"
 
 | What the browser shows | Cause | Fix |
 |---|---|---|
-| `ERR_CONNECTION_REFUSED` / "This site can't be reached" | Nothing listening on that port | The service is on 9101+ - resolve the real port |
+| `ERR_CONNECTION_REFUSED` / "This site can't be reached" | Nothing listening on that port | It is on 9101+; use the tray's **Open dashboard** |
 | A styled 404 belonging to some other product | Another application owns the port | [Wrong application on the port](#wrong-application-on-the-port) |
-| Plain text `Dashboard not found. Ensure public/dashboard.html exists.` | Our service is up, but `public\dashboard.html` did not deploy | Reinstall with `-Repair` |
-
-### The port is the usual answer
-
-The service binds the first free port in **9100-9109**. Port 9100 is the RAW/JetDirect printing port and is very often already taken.
-
-```powershell
-type "$env:ProgramData\XPThermalService\active_port.txt"
-```
-
-Open the dashboard on *that* port.
-
-### Missing dashboard file
-
-```powershell
-dir "$env:ProgramData\XPThermalService\public\dashboard.html"
-```
-
-The service looks in three locations relative to the working directory and its own install path. If none exists it returns that plain-text 404. Fix by reinstalling - do not copy the file in by hand, because a missing `public\` folder means the deploy was incomplete in other ways too:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Repair
-```
 
 ### A query string you did not type
 
-If the address bar gains something like `?compiler=wasm`, it did **not** come from this service. Nothing in the codebase appends query parameters, and the `/` to `/dashboard` redirect strips them.
-
-It also cannot cause a 404: routing matches on path only, so `/dashboard?anything=x` reaches the same handler as `/dashboard`.
-
-Sources, in order of likelihood: browser omnibox autocomplete from history; a browser extension; or another application on the port. Confirm by opening the URL in a private window with the autocomplete suggestion dismissed. **Then go diagnose the real problem** - the query string is a distraction.
+If the address bar gains something like `?compiler=wasm`, it did **not** come from this service. Nothing in the codebase appends query parameters, and the `/` to `/dashboard` redirect strips them. It cannot cause a 404 either: routing matches on path only. The usual sources are browser autocomplete, an extension, or another application on the port.
 
 ---
 
 ## Nothing is listening
 
-Service reports Running, but no port in range answers.
+The app is running but no port in range answers.
 
-1. Check the daemon log - a crash before logging initialises surfaces only here:
-   ```powershell
-   Get-Content "$env:ProgramData\XPThermalService\daemon\*.log" -Tail 50
-   ```
+1. Read the logs (tray → **Open logs folder**). `console.log` shows a crash before logging started; `supervisor.log` shows restarts. The supervisor restarts the print server after 5 s, 10 s, then 30 s, so a server that keeps exiting shows there as a repeating pattern.
 2. All ten ports occupied is possible but rare. `netstat -ano | findstr ":910"` will show it.
-3. **`Restart-Service` does not cycle the Node child process.** If you restarted that way and nothing changed, that is why. Use `-Restart` on the installer or the dashboard's restart.
 
 ---
 
 ## Wrong application on the port
-
-Map the listener to a process:
 
 ```powershell
 netstat -ano | findstr ":9100"
 tasklist /FI "PID eq <pid>"
 ```
 
-Common occupants: a network printer's Standard TCP/IP port monitor, print-server software, another vendor's POS bridge, or a leftover instance of this service.
+Common occupants: a network printer's Standard TCP/IP port monitor, print-server software, another vendor's POS bridge, or the old XP Thermal Print Service.
 
-The fallback handles this automatically - no action is strictly required. But **record what holds 9100**, because it will hold it again after every reboot, and the next person will also assume 9100.
-
-If the POS is pinned to a fixed port, either free 9100 or point the POS at `active_port.txt` / `/health` discovery instead.
+The fallback handles this automatically, so no action is strictly required. But **record what holds 9100**: it will hold it again after every reboot, and the next person will also assume 9100.
 
 ---
 
-## Service will not start
+## Windows says "Windows protected your PC"
 
-```powershell
-Get-Service -Name xpthermalprintservice.exe
-(Get-CimInstance Win32_Service -Filter "Name='xpthermalprintservice.exe'").StartMode
-Get-Content "$env:TEMP\XPThermalInstall_*.log" -Tail 60
-```
+The download is not code-signed yet. Click **More info → Run anyway**. To be sure the file is genuine, compare `Get-FileHash .\ThermalBridge-Setup.exe` with `SHA256SUMS.txt` from the same release.
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `Get-Service` finds nothing | Wrong name - `-Name` matches `xpthermalprintservice.exe`, not the display name | Query by `-Name xpthermalprintservice.exe` or `-DisplayName "XP Thermal Print Service"` |
-| Exit code 4 | Another instance already running | Stop it, or use the service rather than launching by hand |
-| Starts then stops | Print Spooler dependency unmet | `Start-Service Spooler`, then start the service |
-| Start type is not `Auto` | Registration incomplete | Reinstall with `-Repair` |
+---
 
-Half-finished installs are not worth repairing by hand:
+## Setup could not finish
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Repair
-```
+The setup window says why, in plain words. Every run, silent or not, also logs to `%TEMP%\ThermalBridge-Setup.log`.
 
-### Service name vs display name
-
-The service is registered under the **Name** `xpthermalprintservice.exe` with the **DisplayName** `XP Thermal Print Service`. Which one you need depends on the tool:
-
-```powershell
-Get-Service -Name xpthermalprintservice.exe          # works
-Get-Service -Name "XP Thermal Print Service"         # also works - PowerShell resolves display names
-sc.exe query xpthermalprintservice.exe               # works
-sc.exe query "XP Thermal Print Service"              # FAILS 1060 - sc.exe needs the real Name
-```
-
-PowerShell's service cmdlets accept either. `sc.exe` accepts only the Name. If a repair step fails with *"The specified service does not exist as an installed service"* while `Get-Service` clearly finds it, that mismatch is the cause.
+- *"Thermal Bridge is still running and could not be updated"*: it did not quit when asked. Right-click the tray icon → **Quit**, then click **Try again**.
+- *"This installer file is damaged"*: the unpacked app did not match the checksum built into the installer. Download it again.
+- A silent install (`/S`) returning exit code `1`: read the log.
 
 ---
 
@@ -143,16 +107,17 @@ PowerShell's service cmdlets accept either. `sc.exe` accepts only the Name. If a
 
 ### No printers found
 
-1. Confirm Windows itself sees the device - nothing downstream can find a printer that Windows does not have:
+1. Confirm Windows itself sees the device. Nothing downstream can find a printer that Windows does not have:
    ```powershell
    Get-Printer | Select-Object Name, PortName, DriverName
    ```
-2. **Find Printers** reporting *"Printer connected but not installed"* means USB presence without a driver. Install one; `Generic / Text Only` works for most ESC/POS units.
-3. A **WMI damaged** warning is survivable - detection falls back to the spooler. Repair when convenient:
+2. **Detect printers** reporting *"Printer connected but not installed"* means the USB device is present but has no driver. Install one; `Generic / Text Only` works for most ESC/POS units.
+3. A **WMI damaged** warning is survivable: detection falls back to the spooler. Repair when convenient:
    ```powershell
    winmgmt /salvagerepository
    ```
    Run as Administrator, then reboot. `Invalid class "Win32_Printer"` is the same underlying fault.
+4. Network printers: the network scan only covers this PC's own subnet. Otherwise use **Add Printer** with the IP address from the printer's self-test page.
 
 ### Printer shows "Not connected"
 
@@ -164,14 +129,14 @@ Press **Details** for the full reasoning rather than guessing from the label.
 | Stale "Use Printer Offline" flag | Windows flag never cleared | Cleared automatically |
 | No USB printing device attached | Unplugged or powered off | Physical check |
 | Out of paper / cover open | Physical | Load paper, close cover |
-| Print Spooler not running | Windows service stopped | **Fix this** restarts it |
+| Print Spooler not running | Windows service stopped | Start the Print Spooler; restarting it needs admin rights, which the per-user app does not have |
 
 ### Printers vanished from config
 
 A `config.json` that fails to parse is preserved as `config.corrupt.*.json` and **never overwritten**. Restore from it:
 
 ```powershell
-dir "$env:ProgramData\XPThermalService\config.corrupt.*.json"
+dir "$env:LOCALAPPDATA\ThermalBridge\config.corrupt.*.json"
 ```
 
 ### Cash drawer will not open
@@ -180,47 +145,41 @@ Almost always the wrong pin. Try the other pin or a longer pulse via **Test draw
 
 ---
 
-## POS cannot connect
+## A website cannot print
 
-1. Confirm the service is healthy and note the real port (see [Start here](#start-here-identify-the-layer)).
-2. Confirm the POS is targeting that port and not a hard-coded 9100.
-3. A CORS rejection returns a **403 naming the origin and how to allow it** - read the body and add the origin to `security.allowedOrigins`. Loopback is always allowed on any port.
-4. Non-loopback callers need the API key. `/api/auth/local-token` serves it, but **only to 127.0.0.1 / ::1** - a 403 from that endpoint means the caller is not on loopback.
+1. Look at the top of the dashboard for *"https://… wants to print"* and click **Allow**. Until then the site gets a **403 that names its origin**. If it was blocked by mistake, **Websites** → Blocked → Unblock.
+2. The site must send `X-API-Key`. `/api/auth/local-token` serves it, but **only to callers on this computer**.
+3. Confirm the site targets the real port, not a hard-coded 9100.
 
 ---
 
 ## Health reports `degraded` or `unhealthy`
 
-Read `reasons` first - it is a plain-language explanation, not a hint.
+Read `reasons` first. It is a plain-language explanation, not a hint, and the dashboard shows it under the banner.
 
-```powershell
-$port = (type "$env:ProgramData\XPThermalService\active_port.txt").Trim()
-(Invoke-RestMethod "http://127.0.0.1:$port/health").reasons
-```
-
-- **`degraded`** - accepting work it cannot currently complete. Usually an offline printer or a stalled queue. Fix the printer; health follows.
-- **`unhealthy`**, or `/health` returning **503** - the job store itself is unusable, so nothing sent will even be recorded. Restart the process. The watchdog does this too. If it recurs, capture the service and daemon logs before repairing.
+- **`degraded`**: accepting work it cannot currently complete. Usually an offline printer or a stalled queue. Fix the printer and health follows.
+- **`unhealthy`**, or `/health` returning **503**: the job store itself is unusable. The server's watchdog exits and the supervisor starts a fresh one. If it recurs, collect the logs.
 
 ---
 
-## New build not taking effect
+## Update problems
 
-The deployed copy does not self-update, and `Restart-Service` does not cycle the Node child. Re-run the installer with `-Repair`, then restart via the dashboard or `POST /api/service/restart`.
+- *"Thermal Bridge will not run this installer"*: the downloaded installer is not signed by XenithPulse (or not signed at all). This is deliberate. Download it from the releases page and run it yourself if you trust it.
+- *"FAILED verification"*: the download did not match the checksum in the update manifest and was deleted. Try again; if it persists, the download is being altered on the way.
 
 ---
 
 ## What to collect before escalating
 
 ```powershell
-$out = "$env:TEMP\xp-diag"
+$out = "$env:TEMP\thermal-bridge-diag"
 New-Item -ItemType Directory -Force $out | Out-Null
-Get-Service -Name xpthermalprintservice.exe | Out-File "$out\service.txt"
+Get-Process ThermalBridge, ThermalBridgeTray -ErrorAction SilentlyContinue | Out-File "$out\processes.txt"
 netstat -ano | findstr ":910" | Out-File "$out\ports.txt"
 Get-Printer | Out-File "$out\printers.txt"
-Copy-Item "$env:ProgramData\XPThermalService\logs\*" $out -ErrorAction SilentlyContinue
-Copy-Item "$env:ProgramData\XPThermalService\daemon\*.log" $out -ErrorAction SilentlyContinue
-Copy-Item "$env:TEMP\XPThermalInstall_*.log" $out -ErrorAction SilentlyContinue
-Copy-Item "$env:ProgramData\XPThermalService\config.json" $out -ErrorAction SilentlyContinue
+Copy-Item "$env:LOCALAPPDATA\ThermalBridge\logs\*" $out -ErrorAction SilentlyContinue
+Copy-Item "$env:LOCALAPPDATA\ThermalBridge\config.json" $out -ErrorAction SilentlyContinue
+Copy-Item "$env:TEMP\ThermalBridge-Setup.log" $out -ErrorAction SilentlyContinue
 explorer $out
 ```
 

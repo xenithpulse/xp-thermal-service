@@ -294,7 +294,7 @@ async function suitePrintSystem() {
   return snapshot;
 }
 
-async function suiteDiscoveryEndpoint(snapshot) {
+async function suiteDiscoveryEndpoint(_snapshot) {
   section('Printer discovery');
 
   let discovered;
@@ -839,7 +839,9 @@ async function suiteResilience() {
   await check('Raw-printing helper is pre-built, not compiled per job', async () => {
     // Compiling the winspool shim on every receipt cost ~600ms and needed a
     // working C# compiler and writable TEMP at print time.
-    const dll = path.join(process.cwd(), 'data', 'RawPrinterHelper.dll');
+    // The DLL name carries a hash of its source (see winspool.ts).
+    const dataDir = path.join(process.cwd(), 'data');
+    const dll = path.join(dataDir, fs.readdirSync(dataDir).find((f) => /^RawPrinterHelper-[0-9a-f]+\.dll$/.test(f)) || 'RawPrinterHelper-missing.dll');
     assert(fs.existsSync(dll), 'RawPrinterHelper.dll was not pre-built at startup');
     return `cached helper present (${fs.statSync(dll).size} bytes)`;
   });

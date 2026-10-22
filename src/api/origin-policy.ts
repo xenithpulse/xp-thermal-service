@@ -18,6 +18,8 @@ import * as os from 'os';
 export interface OriginPolicyOptions {
   /** Extra origins from config; may contain `*` wildcards. */
   allowedOrigins: string[];
+  /** Origins refused from the dashboard. Beats everything except loopback. */
+  blockedOrigins?: string[];
   /** Trust browsers elsewhere on the private LAN (POS terminals). */
   allowPrivateNetwork: boolean;
 }
@@ -26,6 +28,8 @@ export interface OriginDecision {
   allowed: boolean;
   /** Why the origin was accepted or rejected — logged, and returned on 403. */
   reason: string;
+  /** Rejected because the operator blocked it, rather than because it is unknown. */
+  blocked?: boolean;
 }
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0']);
@@ -126,7 +130,14 @@ export class OriginPolicy {
       return { allowed: true, reason: 'Origin is this machine' };
     }
 
-    // 3. Explicit configuration, exact or wildcard.
+    // 3. Refused from the dashboard. Checked before the allow-list and the
+    //    private-network rule so that "Block" always means blocked.
+    const lower = origin.toLowerCase();
+    if ((this.options.blockedOrigins ?? []).some((b) => b.trim().toLowerCase() === lower)) {
+      return { allowed: false, blocked: true, reason: `Origin "${origin}" was blocked in the Thermal Bridge dashboard.` };
+    }
+
+    // 4. Explicit configuration, exact or wildcard.
     for (const pattern of this.options.allowedOrigins) {
       const candidate = pattern.trim();
       if (!candidate) continue;
@@ -142,7 +153,7 @@ export class OriginPolicy {
       }
     }
 
-    // 4. Other machines on the same private network (a POS terminal talking to
+    // 5. Other machines on the same private network (a POS terminal talking to
     //    the till PC), when enabled.
     if (this.options.allowPrivateNetwork && isPrivateAddress(hostname)) {
       return { allowed: true, reason: 'Private network origin' };
@@ -151,9 +162,8 @@ export class OriginPolicy {
     return {
       allowed: false,
       reason:
-        `Origin "${origin}" is not allowed. Add it to security.allowedOrigins in ` +
-        `config.json (wildcards such as "https://*.example.com" are supported), ` +
-        `or use the Settings page in the dashboard.`
+        `Origin "${origin}" is not allowed yet. Open the Thermal Bridge dashboard ` +
+        `and click Allow next to this site, or add it to security.allowedOrigins.`
     };
   }
 

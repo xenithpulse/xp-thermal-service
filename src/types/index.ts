@@ -628,6 +628,11 @@ export interface SecurityConfig {
    * on every port and need not be listed.
    */
   allowedOrigins: string[];
+  /**
+   * Origins the operator refused from the dashboard's pairing prompt. Kept so
+   * a site that keeps retrying is not offered again on every request.
+   */
+  blockedOrigins?: string[];
   allowedHosts: string[];
   rateLimitPerMinute: number;
   enableApiKey: boolean;

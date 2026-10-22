@@ -13,6 +13,7 @@ import {
   TemplateType
 } from '../types';
 import { Logger } from '../utils/logger';
+import { readAsset } from '../app/assets';
 
 /**
  * Most finished rows the store will hold, whatever their age. The busiest
@@ -64,7 +65,12 @@ export class JobStore {
 
   private async initialize(cleanupIntervalMs: number): Promise<void> {
     try {
-      this.SQL = await initSqlJs();
+      // Hand sql.js its WebAssembly directly. Left to itself it looks for the
+      // .wasm next to its own script, which does not exist inside the exe.
+      const wasm = readAsset('sql-wasm.wasm');
+      this.SQL = await initSqlJs(
+        wasm ? { wasmBinary: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength) as ArrayBuffer } : undefined
+      );
 
       // Load existing database or create new one
       if (fs.existsSync(this.dbPath)) {

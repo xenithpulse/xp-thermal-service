@@ -705,10 +705,11 @@ export const EscPosUtils = {
         return str + char.repeat(padding);
       case 'right':
         return char.repeat(padding) + str;
-      case 'center':
+      case 'center': {
         const leftPad = Math.floor(padding / 2);
         const rightPad = padding - leftPad;
         return char.repeat(leftPad) + str + char.repeat(rightPad);
+      }
     }
   },
 

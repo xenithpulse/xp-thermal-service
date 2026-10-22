@@ -4,6 +4,8 @@ node_modules/
 # Build output
 dist/
 build/
+release/
+.cache/
 
 # Data files
 data/
@@ -19,6 +21,9 @@ logs/
 config.json
 !config.example.json
 active_port.txt
+service-endpoint.json
+app-state.json
+triggers/
 
 # Environment
 .env

@@ -99,7 +99,6 @@ describe('ConfigManager loading', () => {
 
   it('backs up a corrupt config so it can be recovered', () => {
     write('{ broken');
-    // eslint-disable-next-line no-new
     new ConfigManager(configPath);
     const backups = fs.readdirSync(dir).filter((f) => f.includes('.corrupt.'));
     expect(backups.length).toBeGreaterThan(0);
@@ -210,7 +209,7 @@ describe('retry window migration', () => {
   }
 
   function savedRetries(): number {
-    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^﻿/, ''));
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''));
     return parsed.queue.maxRetries;
   }
 

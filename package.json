@@ -1,34 +1,48 @@
 {
-  "name": "xp-thermal-service",
-  "version": "2.1.2",
-  "description": "Production-grade local thermal printing service for restaurant POS",
+  "name": "thermal-bridge",
+  "version": "3.0.1",
+  "description": "Thermal Bridge by XenithPulse: silent receipt printing for web apps. A local service that prints ESC/POS to USB and network thermal printers.",
+  "homepage": "https://xenithpulse.com/products/thermal-bridge",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xenithpulse/xp-thermal-service.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xenithpulse/xp-thermal-service/issues"
+  },
   "main": "dist/index.js",
   "bin": {
-    "xp-thermal": "dist/cli.js"
+    "thermal-bridge": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:dashboard && tsc",
+    "build:dashboard": "node scripts/build-dashboard.mjs",
+    "dev:dashboard": "node scripts/build-dashboard.mjs --watch",
+    "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
+    "bundle": "esbuild src/app/main.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/thermal-bridge.cjs --define:__THERMAL_BRIDGE_EXE__=true --log-override:unsupported-require-call=silent",
+    "app": "npm run build:dashboard && npm run bundle && node dist/thermal-bridge.cjs",
     "cli": "ts-node src/cli.ts",
-    "service:install": "node dist/service/installer.js install",
-    "service:uninstall": "node dist/service/installer.js uninstall",
-    "service:start": "node dist/service/installer.js start",
-    "service:stop": "node dist/service/installer.js stop",
+    "build:exe": "npm run typecheck && npm run build:dashboard && node scripts/build-exe.mjs",
+    "publish:r2": "node scripts/publish-r2.mjs",
+    "icon": "node scripts/make-icon.mjs",
     "test": "jest",
+    "lint": "eslint src tests scripts && node scripts/build-dashboard.mjs --check",
     "qa": "node scripts/deep-qa.js",
     "qa:write": "node scripts/deep-qa.js --write",
-    "qa:full": "node scripts/deep-qa.js --write --print",
-    "lint": "eslint src/**/*.ts"
+    "qa:full": "node scripts/deep-qa.js --write --print"
   },
   "keywords": [
     "thermal-printer",
     "escpos",
     "pos",
     "receipt",
-    "restaurant"
+    "restaurant",
+    "silent-printing",
+    "qz-tray-alternative"
   ],
-  "author": "",
+  "author": "XenithPulse",
   "license": "MIT",
   "dependencies": {
     "commander": "^12.0.0",
@@ -44,19 +58,26 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@tailwindcss/cli": "^4.3.3",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.25",
     "@types/jest": "^30.0.0",
-    "@types/node": "^20.11.16",
-    "@types/node-windows": "^0.1.6",
+    "@types/node": "^22.20.5",
     "@types/qrcode": "^1.5.5",
     "@types/sql.js": "^1.4.10",
     "@types/uuid": "^9.0.8",
+    "esbuild": "^0.25.12",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
     "jest": "^30.4.2",
-    "node-windows": "^1.0.0-beta.8",
+    "postject": "^1.0.0-alpha.6",
+    "resedit": "^3.1.0",
+    "tailwindcss": "^4.3.3",
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.72.0"
   },
   "engines": {
     "node": ">=18.0.0"

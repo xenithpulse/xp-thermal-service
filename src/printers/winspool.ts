@@ -41,8 +41,7 @@ export const PRINTER_ATTRIBUTE = {
   ENABLE_BIDI: 0x00000800
 } as const;
 
-/** Name of the pre-compiled assembly cached under the data directory. */
-export const HELPER_ASSEMBLY_NAME = 'RawPrinterHelper.dll';
+import { createHash } from 'crypto';
 
 /**
  * C# source for both helpers.
@@ -92,7 +91,7 @@ public class RawPrinterHelper
     {
         IntPtr hPrinter;
         DOCINFOA di = new DOCINFOA();
-        di.pDocName = "XP Thermal Document";
+        di.pDocName = "Thermal Bridge receipt";
         di.pDatatype = "RAW";
 
         if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero))
@@ -229,3 +228,14 @@ public class PrinterEnum
     }
 }
 `.trim();
+
+/**
+ * Name of the pre-compiled assembly cached under the data directory.
+ *
+ * Carries a hash of the source, so changing the C# above can never leave a
+ * machine loading a stale DLL built from the previous version.
+ */
+export const HELPER_ASSEMBLY_NAME = `RawPrinterHelper-${createHash('sha256')
+  .update(WINSPOOL_SOURCE)
+  .digest('hex')
+  .slice(0, 12)}.dll`;

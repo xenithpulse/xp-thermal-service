@@ -2,6 +2,8 @@
 
 Audience: whoever picks this up next.
 
+> Written for XP Thermal Service 1.x. Since 3.0 (Thermal Bridge) the service ships as one exe with a supervisor, so notes below about `Restart-Service`, `install.ps1` or the WinSW wrapper apply to the legacy deployment (`legacy/`, and Pulsar POS's own installer) only. For the exe see [BUILD.md](BUILD.md) and [SERVICE-MODE.md](SERVICE-MODE.md); its TODO list is at the end of BUILD.md.
+
 State: 196 tests passing. The service works. Everything below was found by checking the README against the source and a running instance — verified items were reproduced, proposed items are judgement calls.
 
 Ordered by consequence. **Phases 1, 2 and 3 are done.** What remains is listed under [Still open](#still-open).
@@ -16,7 +18,7 @@ No new capability. Surfaces what the service already knows.
 
 ### 1.1 The Jobs page hides failed and dead-lettered jobs — *verified defect* — **fixed**
 
-The dashboard requests `/api/jobs?limit=20` with no status filter, and the server defaults an unfiltered query to **pending only** ([server.ts:740](../src/api/server.ts#L740), [dashboard.html:1078](../public/dashboard.html#L1078)).
+The dashboard requests `/api/jobs?limit=20` with no status filter, and the server defaults an unfiltered query to **pending only** ([server.ts:740](../src/api/server.ts#L740), [the dashboard](../src/dashboard/dashboard.html)).
 
 On a healthy till the pending list is permanently empty, so the page reads "No recent jobs" while `/health` reports jobs that will never print. A site hit exactly this: health said *"1 job(s) have exhausted their retries"* and the Jobs page showed nothing.
 

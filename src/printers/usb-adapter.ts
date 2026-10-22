@@ -42,7 +42,7 @@ import {
   PrinterIdentityHints
 } from './printer-resolver';
 import { PrinterConfig, PrinterStatus } from '../types';
-import { WINSPOOL_SOURCE } from './winspool';
+import { WINSPOOL_SOURCE, HELPER_ASSEMBLY_NAME } from './winspool';
 import { Logger } from '../utils/logger';
 
 // Max items in write queue to prevent unbounded memory growth
@@ -68,6 +68,7 @@ const RAW_PRINTER_SOURCE = WINSPOOL_SOURCE;
  * "XP-80C @ Kitchen" or "HP LaserJet Pro M15w+". We reject only control
  * characters, which cannot appear in a real queue name.
  */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 export interface PrinterRebindEvent {
@@ -149,7 +150,7 @@ export class USBPrinterAdapter extends BasePrinterAdapter {
     if (process.platform !== 'win32') return null;
 
     const outDir = path.join(process.cwd(), 'data');
-    const outPath = path.join(outDir, 'RawPrinterHelper.dll');
+    const outPath = path.join(outDir, HELPER_ASSEMBLY_NAME);
 
     try {
       if (!fs.existsSync(outDir)) {

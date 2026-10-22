@@ -156,12 +156,12 @@ const ServerConfigSchema = z.object({
 });
 
 /**
- * Origins the POS front-end is served from.
+ * Origins the Pulsar POS front-end is served from.
  *
- * These are merged into every configuration on load, so a freshly imaged till
- * can talk to the service without anyone editing config.json. Loopback is
- * already trusted on any port; these cover the named host and the LAN address
- * the POS is published on.
+ * Merged into the configuration on load when running for the POS (service and
+ * legacy modes), so a freshly imaged till can talk to the service without
+ * anyone editing config.json. The per-user app does not add them: a restaurant
+ * running some other web POS approves its origin from the dashboard instead.
  */
 export const POS_DEFAULT_ORIGINS = [
   'http://pos.xenithpulse.local:8090',
@@ -177,7 +177,8 @@ const SecurityConfigSchema = z.object({
   // port 9100 to 9101 keeps working.
   allowedOrigins: z
     .array(z.string())
-    .default([...POS_DEFAULT_ORIGINS, 'http://localhost:3000', 'http://127.0.0.1:3000']),
+    .default(['http://localhost:3000', 'http://127.0.0.1:3000']),
+  blockedOrigins: z.array(z.string()).default([]),
   allowedHosts: z.array(z.string()).default(['localhost', '127.0.0.1']),
   rateLimitPerMinute: z.number().min(1).max(1000).default(60),
   enableApiKey: z.boolean().default(true),
@@ -304,7 +305,11 @@ export class ConfigManager {
   /** Set during load when a too-short retry window was migrated. */
   private pendingQueueRetrySave = false;
 
-  constructor(configPath?: string) {
+  /** Whether to merge Pulsar POS's origins in on load. */
+  private readonly mergePosOrigins: boolean;
+
+  constructor(configPath?: string, options: { mergePosOrigins?: boolean } = {}) {
+    this.mergePosOrigins = options.mergePosOrigins !== false;
     this.configPath = configPath || this.getDefaultConfigPath();
     this.config = this.loadConfig();
 
@@ -427,7 +432,7 @@ export class ConfigManager {
 
     // Guarantee the POS can reach the service on every machine, including ones
     // upgraded from a config written before these hosts existed.
-    const missingPosOrigins = POS_DEFAULT_ORIGINS.filter(
+    const missingPosOrigins = !this.mergePosOrigins ? [] : POS_DEFAULT_ORIGINS.filter(
       (origin) => !config.security.allowedOrigins.includes(origin)
     );
     if (missingPosOrigins.length > 0) {

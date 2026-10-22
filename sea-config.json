@@ -1,0 +1,15 @@
+{
+  "main": "dist/thermal-bridge.cjs",
+  "output": "build/sea-prep.blob",
+  "disableExperimentalSEAWarning": true,
+  "useSnapshot": false,
+  "useCodeCache": true,
+  "assets": {
+    "dashboard.html": "public/dashboard.html",
+    "icon.ico": "assets/icon.ico",
+    "sql-wasm.wasm": "node_modules/sql.js/dist/sql-wasm.wasm",
+    "config.example.json": "config.example.json",
+    "ThermalBridgeTray.exe": "build/helpers/ThermalBridgeTray.exe",
+    "ThermalBridgeService.exe": "build/helpers/ThermalBridgeService.exe"
+  }
+}

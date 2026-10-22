@@ -134,7 +134,7 @@ This endpoint is **loopback-only** ([server.ts:563-570](../src/api/server.ts#L56
 { "error": "Forbidden", "message": "Only available from localhost" }
 ```
 
-So a **remotely-hosted page cannot bootstrap the key this way.** For a public site, have the operator copy the key from the dashboard's Settings page once and store it in your app's own settings.
+So a **remotely-hosted page cannot bootstrap the key this way.** For a public site, have the operator copy the key from the dashboard (Settings → Security → API key) once and store it in your app's own settings.
 
 ---
 
@@ -150,23 +150,26 @@ Evaluated in order — the first match wins:
 | 2 | Malformed `Origin` | No |
 | 3 | **Loopback hostname, any port** (`localhost`, `127.0.0.1`, `::1`) | Yes, always |
 | 4 | An address this machine currently holds | Yes |
-| 5 | Exact match in `security.allowedOrigins` | Yes |
-| 6 | `*` in `allowedOrigins` | Yes |
-| 7 | Wildcard pattern match, e.g. `https://*.pos.example.com` | Yes |
-| 8 | **Private network** origin (RFC1918, link-local, `.local`) when `allowPrivateNetwork` is on | Yes |
-| — | Anything else | **403** |
+| 5 | Exact match in `security.blockedOrigins` (the operator clicked **Block**) | **No**, even if listed below |
+| 6 | Exact match in `security.allowedOrigins` | Yes |
+| 7 | `*` in `allowedOrigins` | Yes |
+| 8 | Wildcard pattern match, e.g. `https://*.pos.example.com` | Yes |
+| 9 | **Private network** origin (RFC1918, link-local, `.local`) when `allowPrivateNetwork` is on | Yes |
+| — | Anything else | **403**, and offered to the operator for pairing |
 
-The rejection tells you exactly how to fix it:
+The first request from an unknown origin puts it at the top of the Thermal Bridge dashboard: *"https://app.example.com wants to print — Allow / Block"*. Once the operator clicks **Allow**, your next request succeeds. No restart, and nobody edits JSON. Until then the rejection says what to do:
 
 ```json
 {
   "error": "Forbidden",
-  "message": "Origin \"https://app.example.com\" is not allowed. Add it to security.allowedOrigins in config.json (wildcards such as \"https://*.example.com\" are supported), or use the Settings page in the dashboard.",
+  "message": "Origin \"https://app.example.com\" is not allowed yet. Open the Thermal Bridge dashboard and click Allow next to this site, or add it to security.allowedOrigins.",
   "origin": "https://app.example.com"
 }
 ```
 
-Add your origin via the dashboard's **Settings → Allowed Origins**, or in `config.json`:
+A good first-run experience for your users: on a 403, show *"Open Thermal Bridge and click Allow"* and retry every few seconds.
+
+For automated deployments, origins can still be listed in `config.json`:
 
 ```json
 "allowedOrigins": ["https://app.example.com", "https://*.staging.example.com"]
